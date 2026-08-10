@@ -27,7 +27,7 @@ def coordinator_prompt(
         ""
         if startup_prompt is None or not startup_prompt.strip()
         else (
-            "\nAdditional user startup instructions for this Coordinator session:\n"
+            "\nWorkspace Coordinator instructions (apply to every Coordinator turn):\n"
             f"{startup_prompt.strip()}\n"
         )
     )
@@ -39,7 +39,7 @@ Inspect the current repository and durable tracker rather than assuming work sta
 ticket. Choose exactly one safe next action and match the supplied JSON schema.
 
 Initiative spec: {spec}
-Execution map: {execution_map}
+Durable LoopAI tracker: {execution_map}
 Candidate ticket id: {ticket_id or "none"}
 Candidate ticket path: {target}
 Candidate tracker status: {tracker_status or "none"}
@@ -67,14 +67,24 @@ def coordinator_response_prompt(
     ticket_id: str | None,
     executor_session_id: str | None,
     verifier_session_id: str | None,
+    startup_prompt: str | None = None,
 ) -> str:
     skill = GRILLING_SKILL if grill_mode else COORDINATOR_SKILL
+    instructions = (
+        ""
+        if startup_prompt is None or not startup_prompt.strip()
+        else (
+            "\nWorkspace Coordinator instructions (apply to every Coordinator turn):\n"
+            f"{startup_prompt.strip()}\n"
+        )
+    )
     return f"""{skill}
 
 Continue the same Coordinator decision process with the user's answer below. Re-read repository
 state when the answer changes an assumption. In grill mode, recompute the decision-tree frontier,
 ask the next complete round when branches remain, and request explicit confirmation of the final
 plan before returning an execution action.
+{instructions}
 
 User answer:
 {answer}
@@ -133,8 +143,8 @@ This is orchestration round {round_number}. The executor reported:
 {executor_summary}
 
 Treat that report only as a claim. Inspect raw repository state and independently replay the
-required evidence. Do not modify product code. Update only verifier-owned artifacts and the
-ticket/execution-map state allowed by the skill. Your final response must match the supplied JSON
-schema. Set `status` mechanically according to the skill and put actionable evidence or failure
-details in `summary`.
+required evidence. Do not modify product code. Update only verifier-owned artifacts; LoopAI owns
+the durable execution tracker and persists the returned status. Your final response must match the
+supplied JSON schema. Set `status` mechanically according to the skill and put actionable evidence
+or failure details in `summary`.
 """

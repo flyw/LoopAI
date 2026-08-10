@@ -1,7 +1,8 @@
 # Example initiative
 
 This example demonstrates a complete spec-driven frontier. The orchestrator discovers the
-adjacent `README.md`, reads its Ticket Index, and completes every ticket in dependency order.
+adjacent `issues/*.md` files, reads their ticket metadata, creates `.loopai/execution.json`, and
+completes every ticket in dependency order. The adjacent `README.md` is documentation only.
 
 ## Objective
 

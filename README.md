@@ -1,8 +1,9 @@
 # LoopAI agent loop
 
 一个由 Python `asyncio` 驱动的 spec-first 开发循环。调用方不指定具体 ticket；工具从
-initiative 的 `spec.md` 出发，读取同目录 `README.md` 中的 CropAI 风格 Ticket Index，
-按照 blocker/frontier 顺序完成全部 ticket。
+initiative 的 `spec.md` 出发，自动扫描同目录 `issues/*.md` 中的 ticket 元数据，创建并维护
+`.loopai/execution.json`，再按照 blocker/frontier 顺序完成全部 ticket。initiative 的
+`README.md` 只作为人类说明文档，不参与执行。
 
 每个 initiative 使用一个 Coordinator，并为每个 ticket 使用两个独立 agent：
 
@@ -21,7 +22,7 @@ initiative 的 `spec.md` 出发，读取同目录 `README.md` 中的 CropAI 风�
 
 Coordinator 只能返回 schema 中声明的动作。Python 安全层会机械校验当前 ticket、依赖、
 角色切换和 resume session ID；模型不能跳过 blocker、绕过独立验证或自行宣告完成。
-程序重启后会重新读取 execution map，跳过 `completed`，并对
+程序重启后会重新读取 `.loopai/execution.json`，跳过 `completed`，并对
 `ready-for-verification` 直接启动 Verifier，不会从第一张 ticket 重做。Coordinator session
 ID 会保存在当前 initiative 的 `.loopai/sessions.json`。保存的 session 无法恢复时，会启动
 新 session，并用持久化问答和当前 repository 状态重建上下文。
@@ -40,6 +41,10 @@ Coordinator 会优先自行检查 repository 和 tracker。缺少会改变范围
 - `/status`：查看当前问答状态；
 - `/back`：要求 Coordinator 回到上一项回答；
 - `/cancel`：安全停止当前 initiative。
+
+交互终端会在问题后留出空行，并显示单独的 `>` 输入提示。回答可以包含多行；输入完成后再
+输入一个空行提交，LoopAI 会把这些行作为一个完整回答交给 Coordinator。上述三个斜杠命令
+输入一行并回车即可立即生效。
 
 如果模型没有填写 `question`，LoopAI 会根据 `reason` 和 `feedback` 自动生成问题。非交互
 环境或 `--json` 模式不会读取终端，改为发出 `user.input.required` 事件并以
@@ -60,14 +65,16 @@ loopai \
 initiative/.loopai/
 ├── conversation.json
 ├── sessions.json
+├── execution.json
 └── active.lock
 ```
 
-不同 workspace 或 initiative 可以并行运行；同一 initiative 的第二个进程会被锁拒绝。
+`execution.json` 由 LoopAI 自动创建和更新，保存 ticket 的状态、路径和依赖关系。不同
+workspace 或 initiative 可以并行运行；同一 initiative 的第二个进程会被锁拒绝。
 `.loopai/` 会写入该 workspace 的 `.git/info/exclude`，不会修改团队共享的 `.gitignore`。
 
-三个角色的默认模型由 workspace 的 `.loopai/config.toml` 管理。Coordinator 和 Verifier
-默认使用 `gpt-5.6-sol` / `high`，Executor 默认使用 `gpt-5.6-terra` / `medium`。唯一的模型
+三个角色的默认模型由 workspace 的 `.loopai/config.toml` 管理。Coordinator、Executor 和
+Verifier 默认都使用 `gpt-5.6-luna` / `medium`。唯一的模型
 调用路径是本机
 `codex exec --json` 子进程；本项目不使用 OpenAI SDK、不直接请求 Responses API，也不读取
 API key。Codex 输出的每个 JSONL 事件都会通过异步迭代器立即转发。
@@ -82,20 +89,21 @@ Python `asyncio` 默认 64 KiB 行限制中断长事件，同时保持逐事件�
 ```text
 initiative/
 ├── spec.md
-├── README.md              # 含 Ticket Index 表格、Status、Blocked by
+├── README.md              # 可选，仅供人类阅读
 ├── issues/
-│   ├── 01-first.md
+│   ├── 01-first.md        # 含 Status / Blocked by 元数据
 │   └── 02-second.md
 └── artifacts/
 ```
 
-工具以 Ticket Index 的表格顺序作为同一 frontier 内的稳定选择顺序，并使用 `Blocked by`
-构建依赖图。它会：
+工具按 ticket 文件名中的数字 ID 和文件顺序建立稳定 frontier，并从 ticket 文件中的
+`Blocked by` 构建依赖图。它会：
 
 - 校验 ticket 文件、重复 ID、未知 blocker 和依赖环；
+- 首次启动时自动创建 `.loopai/execution.json`，之后保留已有状态；
 - 跳过 tracker 中已经 `completed` 的 ticket；
-- 每完成一票后重新读取 README，获取 verifier 更新后的 frontier；
-- Verifier 声称完成但未把 tracker 持久化为 `completed` 时立即停止；
+- 每完成一票后由 LoopAI 自动把状态写入 tracker，再重新读取 frontier；
+- 如果 ticket 文件被删除，会停止并要求删除 tracker 后重新初始化，避免误丢失执行状态；
 - 自动恢复 `ready-for-verification` 的票，只启动 Verifier；
 - 当有多个 `spec.md` 时要求用 `--spec` 消除歧义。
 
@@ -227,17 +235,17 @@ loopai \
 
 ```toml
 [coordinator]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-# startup_prompt = """请使用中文与用户交互。"""
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
+startup_prompt = """请使用中文与用户交互。"""
 
 [executor]
-model = "gpt-5.6-terra"
+model = "gpt-5.6-luna"
 reasoning_effort = "medium"
 
 [verifier]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
 ```
 
 首次创建后会继续运行；编辑该文件后，下次启动生效。配置严格校验，未知 section/key、
@@ -247,17 +255,16 @@ Coordinator 还可以配置通用启动提示，例如：
 
 ```toml
 [coordinator]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
 startup_prompt = """
 请使用中文与用户交互。
 提问时尽量简洁，并给出推荐答案。
 """
 ```
 
-`startup_prompt` 只在创建新的 Coordinator 会话时注入；有效会话恢复时不会重复注入。
-如果已保存的 Coordinator 会话失效并被替换，新会话会再次收到该提示。Executor 和
-Verifier 不会收到它。
+`startup_prompt` 会注入每一次 Coordinator prompt，包括有效 session 的恢复调用；Executor 和
+Verifier 不会收到它。你可以把语言、提问方式和本 workspace 的其他要求统一写在这里。
 
 临时覆盖全部角色：
 
@@ -270,10 +277,10 @@ loopai --workspace . --model gpt-5.6-luna --reasoning-effort medium
 ```bash
 loopai \
   --workspace . \
-  --coordinator-model gpt-5.6-sol \
+  --coordinator-model gpt-5.6-luna \
   --coordinator-reasoning-effort max \
-  --executor-model gpt-5.6-terra \
-  --verifier-model gpt-5.6-sol
+  --executor-model gpt-5.6-luna \
+  --verifier-model gpt-5.6-luna
 ```
 
 配置优先级：
@@ -359,8 +366,9 @@ asyncio.run(main())
 
 ## 示例与测试
 
-[examples/spec.md](examples/spec.md) 和 [examples/README.md](examples/README.md) 展示了两张
-具有依赖关系的 ticket。示例需求是占位内容，不建议直接交给 agent 修改本仓库。
+[examples/spec.md](examples/spec.md)、[examples/README.md](examples/README.md) 和
+`examples/issues/*.md` 展示了两张具有依赖关系的 ticket。示例需求是占位内容，不建议直接
+交给 agent 修改本仓库。
 
 测试不会连接模型：
 

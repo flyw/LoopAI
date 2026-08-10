@@ -1,14 +1,14 @@
-# Example Ticket Frontier
+# Example Initiative
 
 ## Current frontier
 
 - 01 — deterministic greeting: ready-for-agent
 - 02 — expose greeting: blocked by 01
 
-## Ticket index
+The executable frontier is managed by LoopAI in `.loopai/execution.json`. Ticket definitions and
+initial dependency metadata live in:
 
-| Ticket | Status | Blocked by | Verification artifact |
-|---|---|---|---|
-| [01 — deterministic greeting](issues/01-greeting.md) | ready-for-agent | none | [01-verification](artifacts/01-verification.md) |
-| [02 — expose greeting](issues/02-expose-greeting.md) | blocked | 01 | [02-verification](artifacts/02-verification.md) |
+- [01 — deterministic greeting](issues/01-greeting.md)
+- [02 — expose greeting](issues/02-expose-greeting.md), blocked by `01`
 
+This README is documentation only and is not parsed by LoopAI.

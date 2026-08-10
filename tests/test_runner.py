@@ -17,7 +17,7 @@ class CodexRunnerTests(TestCase):
         command = self.runner.build_command(AgentRole.EXECUTOR)
 
         self.assertEqual(command[:2], ["codex", "exec"])
-        self.assertIn("gpt-5.6-terra", command)
+        self.assertIn("gpt-5.6-luna", command)
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--approve-for-me", command)
         self.assertNotIn("--sandbox", command)
@@ -40,9 +40,9 @@ class CodexRunnerTests(TestCase):
 
     def test_each_role_uses_its_own_default_model_and_effort(self) -> None:
         expected = {
-            AgentRole.COORDINATOR: ("gpt-5.6-sol", "high"),
-            AgentRole.EXECUTOR: ("gpt-5.6-terra", "medium"),
-            AgentRole.VERIFIER: ("gpt-5.6-sol", "high"),
+            AgentRole.COORDINATOR: ("gpt-5.6-luna", "medium"),
+            AgentRole.EXECUTOR: ("gpt-5.6-luna", "medium"),
+            AgentRole.VERIFIER: ("gpt-5.6-luna", "medium"),
         }
 
         for role, (model, effort) in expected.items():

@@ -25,7 +25,7 @@ class AgentPromptTests(TestCase):
     def test_coordinator_starts_with_explicit_orchestrator_skill_invocation(self) -> None:
         prompt = coordinator_prompt(
             spec=Path("spec.md"),
-            execution_map=Path("README.md"),
+            execution_map=Path(".loopai/execution.json"),
             ticket=Path("ticket.md"),
             ticket_id="01",
             tracker_status="ready-for-agent",
@@ -53,10 +53,25 @@ class AgentPromptTests(TestCase):
         self.assertTrue(prompt.startswith("$mattpocock-skills:grilling\n"))
         self.assertIn("Candidate ticket id: 01", prompt)
 
+    def test_coordinator_response_includes_workspace_instructions(self) -> None:
+        prompt = coordinator_response_prompt(
+            "yes",
+            "{}",
+            grill_mode=False,
+            recommended_action="start-executor",
+            ticket_id="01",
+            executor_session_id=None,
+            verifier_session_id=None,
+            startup_prompt="请使用中文提问。",
+        )
+
+        self.assertIn("请使用中文提问。", prompt)
+        self.assertIn("apply to every Coordinator turn", prompt)
+
     def test_coordinator_startup_prompt_follows_fixed_instructions(self) -> None:
         prompt = coordinator_prompt(
             spec=Path("spec.md"),
-            execution_map=Path("README.md"),
+            execution_map=Path(".loopai/execution.json"),
             ticket=Path("ticket.md"),
             ticket_id="01",
             tracker_status="ready-for-agent",

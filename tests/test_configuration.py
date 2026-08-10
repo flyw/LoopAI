@@ -16,16 +16,24 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             config = workspace / ".loopai" / "config.toml"
 
             self.assertEqual(config.read_text(encoding="utf-8"), DEFAULT_CONFIG)
-            self.assertEqual(settings["coordinator"].model, "gpt-5.6-sol")
-            self.assertEqual(settings["executor"].model, "gpt-5.6-terra")
-            self.assertEqual(settings["verifier"].reasoning_effort, "high")
+            self.assertEqual(settings["coordinator"].model, "gpt-5.6-luna")
+            self.assertEqual(
+                settings["coordinator"].startup_prompt,
+                "请使用中文与用户交互。",
+            )
+            self.assertEqual(settings["executor"].model, "gpt-5.6-luna")
+            self.assertEqual(settings["verifier"].model, "gpt-5.6-luna")
+            self.assertEqual(settings["verifier"].reasoning_effort, "medium")
 
     def test_existing_configuration_is_loaded_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             config_dir = workspace / ".loopai"
             config_dir.mkdir()
-            custom = DEFAULT_CONFIG.replace("gpt-5.6-terra", "custom-executor")
+            custom = DEFAULT_CONFIG.replace(
+                '[executor]\nmodel = "gpt-5.6-luna"',
+                '[executor]\nmodel = "custom-executor"',
+            )
             config = config_dir / "config.toml"
             config.write_text(custom, encoding="utf-8")
 
@@ -67,7 +75,7 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             config_dir = workspace / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
-                '# startup_prompt = """请使用中文与用户交互。"""',
+                'startup_prompt = """请使用中文与用户交互。"""',
                 'startup_prompt = """\n请使用中文与用户交互。\n提问保持简洁。\n"""',
             )
             (config_dir / "config.toml").write_text(custom, encoding="utf-8")
@@ -86,7 +94,7 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             config_dir = workspace / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
-                '# startup_prompt = """请使用中文与用户交互。"""',
+                'startup_prompt = """请使用中文与用户交互。"""',
                 "startup_prompt = 42",
             )
             (config_dir / "config.toml").write_text(custom, encoding="utf-8")

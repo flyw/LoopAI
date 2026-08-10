@@ -70,10 +70,10 @@ async def async_main(argv: list[str] | None = None) -> int:
         recommended = request.get("recommended_answer")
         suffix = f"\nRecommended: {recommended}" if recommended else ""
         return await asyncio.to_thread(
-            input,
+            _read_multiline_input,
             f"\n{question}{suffix}\n"
             "Commands: /status, /back, /cancel\n"
-            "loopai> ",
+            "\n> ",
         )
 
     orchestrator = InitiativeOrchestrator(config, input_provider=input_provider)
@@ -155,6 +155,25 @@ def _print_pretty(event: dict[str, object]) -> None:
         "user.input.status",
     }:
         print(f"{prefix} {kind}: {payload}", flush=True)
+
+
+def _read_multiline_input(prompt: str) -> str | None:
+    """Read one human answer, treating a blank line as the submission boundary."""
+
+    print(prompt, end="", flush=True)
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            return "\n".join(lines) if lines else None
+
+        # Keep the control commands convenient: they take effect after one Enter.
+        if not lines and line.strip().lower() in {"/status", "/back", "/cancel"}:
+            return line
+        if line == "":
+            return "\n".join(lines)
+        lines.append(line)
 
 
 def main() -> None:

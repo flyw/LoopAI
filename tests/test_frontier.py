@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,7 +10,7 @@ from test_orchestrator import create_initiative
 
 
 class FrontierTests(unittest.TestCase):
-    def test_parses_cropai_ticket_index_and_blockers(self) -> None:
+    def test_discovers_ticket_metadata_and_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             spec = create_initiative(workspace)
@@ -20,6 +21,21 @@ class FrontierTests(unittest.TestCase):
         self.assertEqual(frontier.tickets[1].blockers, ("01",))
         self.assertEqual(frontier.next_ticket().ticket_id, "01")
         self.assertEqual(frontier.next_ticket({"01"}).ticket_id, "02")
+
+    def test_creates_tracker_without_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            spec = create_initiative(workspace)
+
+            frontier = Frontier.discover(workspace, spec)
+            tracker = spec.parent / ".loopai" / "execution.json"
+
+            self.assertFalse((spec.parent / "README.md").exists())
+            self.assertEqual(frontier.execution_map, tracker.resolve())
+            payload = json.loads(tracker.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["tickets"][0]["ticket_id"], "01")
+        self.assertEqual(payload["tickets"][1]["blocked_by"], ["01"])
 
     def test_auto_discovers_the_only_spec(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -45,9 +61,11 @@ class FrontierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             spec = create_initiative(workspace)
-            readme = spec.parent / "README.md"
-            readme.write_text(
-                readme.read_text(encoding="utf-8").replace("| 01 | b.md |", "| 99 | b.md |"),
+            first_ticket = spec.parent / "issues" / "01-first.md"
+            first_ticket.write_text(
+                first_ticket.read_text(encoding="utf-8").replace(
+                    "**Blocked by:** None", "**Blocked by:** 99"
+                ),
                 encoding="utf-8",
             )
 

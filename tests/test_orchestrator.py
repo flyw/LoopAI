@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from collections.abc import Awaitable, Callable
@@ -14,14 +15,12 @@ class FakeRunner:
     def __init__(
         self,
         results: list[AgentResult],
-        persist_completion: bool = True,
         coordinator_actions: list[str] | None = None,
         fail_coordinator_resume: bool = False,
         coordinator_question: str | None = "Which direction should LoopAI take?",
     ) -> None:
         self.results = iter(results)
         self.calls: list[dict[str, object]] = []
-        self.persist_completion = persist_completion
         self.coordinator_actions = iter(coordinator_actions or [])
         self.fail_coordinator_resume = fail_coordinator_resume
         self.coordinator_question = coordinator_question
@@ -89,12 +88,6 @@ class FakeRunner:
                 },
             )
         result = next(self.results)
-        if (
-            self.persist_completion
-            and role is AgentRole.VERIFIER
-            and result.status == "completed"
-        ):
-            _mark_completed(ticket)
         return result
 
 
@@ -112,32 +105,20 @@ def calls_for(runner: FakeRunner, role: AgentRole) -> list[dict[str, object]]:
     return [call for call in runner.calls if call["role"] is role]
 
 
-def _mark_completed(ticket: Path) -> None:
-    readme = ticket.parent.parent / "README.md"
-    updated: list[str] = []
-    for line in readme.read_text(encoding="utf-8").splitlines():
-        if ticket.name in line and line.startswith("|"):
-            columns = line.split("|")
-            columns[2] = " completed "
-            line = "|".join(columns)
-        updated.append(line)
-    readme.write_text("\n".join(updated) + "\n", encoding="utf-8")
-
-
 def create_initiative(root: Path, statuses: tuple[str, str] = ("ready-for-agent", "blocked")) -> Path:
     plan = root / ".scratch" / "demo"
     issues = plan / "issues"
     issues.mkdir(parents=True)
     spec = plan / "spec.md"
     spec.write_text("# Demo spec\n", encoding="utf-8")
-    (issues / "01-first.md").write_text("# 01 first\n", encoding="utf-8")
-    (issues / "02-second.md").write_text("# 02 second\n", encoding="utf-8")
-    (plan / "README.md").write_text(
-        "# Frontier\n\n"
-        "| Ticket | Status | Blocked by | Verification artifact |\n"
-        "|---|---|---|---|\n"
-        f"| [01 — first](issues/01-first.md) | {statuses[0]} | none | a.md |\n"
-        f"| [02 — second](issues/02-second.md) | {statuses[1]} | 01 | b.md |\n",
+    (issues / "01-first.md").write_text(
+        "# 01 first\n\n**Status:** "
+        f"{statuses[0]}\n\n**Blocked by:** None\n",
+        encoding="utf-8",
+    )
+    (issues / "02-second.md").write_text(
+        "# 02 second\n\n**Status:** "
+        f"{statuses[1]}\n\n**Blocked by:** 01\n",
         encoding="utf-8",
     )
     return spec
@@ -285,24 +266,23 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].payload["status"], "blocked")
         self.assertEqual(events[-1].payload["stopped_at_ticket"], "01")
 
-    async def test_does_not_unlock_downstream_when_verifier_fails_to_persist_tracker(self) -> None:
+    async def test_verifier_completion_is_persisted_by_loopai(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
-            create_initiative(workspace)
+            spec = create_initiative(workspace, ("ready-for-agent", "completed"))
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "one", "exec-1"),
                     result(AgentRole.VERIFIER, "completed", "claimed", "verify-1"),
                 ],
-                persist_completion=False,
             )
 
             events = await self.collect(workspace, runner)
 
-        self.assertEqual(len(calls_for(runner, AgentRole.EXECUTOR)), 1)
-        self.assertEqual(len(calls_for(runner, AgentRole.VERIFIER)), 1)
-        self.assertEqual(events[-1].payload["status"], "blocked")
-        self.assertIn("did not persist", str(events[-1].payload["summary"]))
+            tracker = spec.parent / ".loopai" / "execution.json"
+            payload = json.loads(tracker.read_text(encoding="utf-8"))
+        self.assertEqual(payload["tickets"][0]["status"], "completed")
+        self.assertEqual(events[-1].payload["status"], "completed")
 
     async def test_awaiting_ticket_stops_before_independent_ready_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -310,11 +290,10 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             spec = create_initiative(
                 workspace, ("awaiting-user-verification", "ready-for-agent")
             )
-            readme = spec.parent / "README.md"
-            readme.write_text(
-                readme.read_text(encoding="utf-8").replace(
-                    "| ready-for-agent | 01 | b.md |",
-                    "| ready-for-agent | none | b.md |",
+            second_ticket = spec.parent / "issues" / "02-second.md"
+            second_ticket.write_text(
+                second_ticket.read_text(encoding="utf-8").replace(
+                    "**Blocked by:** 01", "**Blocked by:** None"
                 ),
                 encoding="utf-8",
             )
@@ -348,7 +327,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             all(call["session_id"] == "coord-1" for call in coordinator_calls[1:])
         )
 
-    async def test_startup_prompt_is_injected_once_per_valid_coordinator_session(self) -> None:
+    async def test_startup_prompt_is_injected_on_every_coordinator_turn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             create_initiative(workspace)
@@ -371,7 +350,8 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         coordinator_calls = calls_for(runner, AgentRole.COORDINATOR)
         prompts = [str(call["prompt"]) for call in coordinator_calls]
         self.assertEqual(
-            sum("请使用中文与用户交互。" in prompt for prompt in prompts), 1
+            sum("请使用中文与用户交互。" in prompt for prompt in prompts),
+            len(prompts),
         )
         worker_prompts = [
             str(call["prompt"])
@@ -410,6 +390,27 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].payload["status"], "awaiting-user-input")
         self.assertTrue(any(event.kind == "user.input.required" for event in events))
         self.assertIn("Which direction should LoopAI take?", state)
+
+    async def test_input_provider_runs_after_required_event_is_delivered(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            spec = create_initiative(workspace)
+            runner = FakeRunner([], coordinator_actions=["ask-user"])
+            delivered: list[str] = []
+
+            async def provide_input(request: dict[str, object]) -> str | None:
+                del request
+                self.assertIn("initiative.started", delivered)
+                self.assertIn("user.input.required", delivered)
+                return None
+
+            orchestrator = InitiativeOrchestrator(
+                LoopConfig(workspace=workspace),
+                runner=runner,  # type: ignore[arg-type]
+                input_provider=provide_input,
+            )
+            async for event in orchestrator.stream(spec):
+                delivered.append(event.kind)
 
     async def test_noninteractive_await_user_without_question_persists_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

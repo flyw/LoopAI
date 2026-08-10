@@ -24,17 +24,17 @@ DEFAULT_CONFIG = """# LoopAI per-role Codex settings.
 # CLI role options override global CLI options, which override this file.
 
 [coordinator]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-# startup_prompt = \"\"\"请使用中文与用户交互。\"\"\"
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
+startup_prompt = \"\"\"请使用中文与用户交互。\"\"\"
 
 [executor]
-model = "gpt-5.6-terra"
+model = "gpt-5.6-luna"
 reasoning_effort = "medium"
 
 [verifier]
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
+model = "gpt-5.6-luna"
+reasoning_effort = "medium"
 """
 
 

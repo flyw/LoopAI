@@ -40,6 +40,9 @@ class InitiativeOrchestrator:
 
         async def emit(event: StreamEvent) -> None:
             await queue.put(event)
+            # Let the stream consumer render queued progress before a worker-side
+            # input provider writes its prompt directly to the terminal.
+            await asyncio.sleep(0)
 
         async def work() -> None:
             nonlocal failure
@@ -105,11 +108,7 @@ class InitiativeOrchestrator:
                     ),
                     executor_session_id=executor_session_id,
                     verifier_session_id=verifier_session_id,
-                    startup_prompt=(
-                        self.config.coordinator_startup_prompt
-                        if coordinator_session is None
-                        else None
-                    ),
+                    startup_prompt=self.config.coordinator_startup_prompt,
                 )
 
             pending = conversation.pending
@@ -153,6 +152,7 @@ class InitiativeOrchestrator:
                     ticket_id=record.ticket_id if record is not None else None,
                     executor_session_id=executor_session_id,
                     verifier_session_id=verifier_session_id,
+                    startup_prompt=self.config.coordinator_startup_prompt,
                 )
 
             for _ in range(self.config.max_questions + 1):
@@ -245,6 +245,7 @@ class InitiativeOrchestrator:
                         ticket_id=record.ticket_id if record is not None else None,
                         executor_session_id=executor_session_id,
                         verifier_session_id=verifier_session_id,
+                        startup_prompt=self.config.coordinator_startup_prompt,
                     )
                     continue
                 raw_question = decision.final_output.get("question")
@@ -302,6 +303,7 @@ class InitiativeOrchestrator:
                     ticket_id=record.ticket_id if record is not None else None,
                     executor_session_id=executor_session_id,
                     verifier_session_id=verifier_session_id,
+                    startup_prompt=self.config.coordinator_startup_prompt,
                 )
             else:
                 return "stop", "Coordinator exceeded the maximum user-question rounds.", None
@@ -451,7 +453,7 @@ class InitiativeOrchestrator:
                 )
                 return
 
-            result = await self._run_ticket(ticket, emit, coordinate, action)
+            result = await self._run_ticket(frontier, ticket, emit, coordinate, action)
             latest_observation = (
                 f"Ticket {ticket.ticket_id} ended with status {result.status}: {result.summary}"
             )
@@ -483,7 +485,7 @@ class InitiativeOrchestrator:
                             "total": len(refreshed.tickets),
                             "stopped_at_ticket": ticket.ticket_id,
                             "summary": (
-                                "Verifier returned completed but the execution map did not "
+                                "Verifier returned completed but the durable tracker did not "
                                 "persist the ticket as completed."
                             ),
                         },
@@ -493,6 +495,7 @@ class InitiativeOrchestrator:
 
     async def _run_ticket(
         self,
+        frontier: Frontier,
         record: TicketRecord,
         emit: Callable[[StreamEvent], Awaitable[None]],
         coordinate: Callable[
@@ -524,6 +527,7 @@ class InitiativeOrchestrator:
                     emit=emit,
                 )
                 executor_session = executor.session_id
+                _persist_worker_status(frontier, record.ticket_id, executor.status)
                 await emit(
                     StreamEvent(
                         kind="agent.completed",
@@ -609,6 +613,7 @@ class InitiativeOrchestrator:
                 emit=emit,
             )
             verifier_session = verifier.session_id
+            _persist_worker_status(frontier, record.ticket_id, verifier.status)
             await emit(
                 StreamEvent(
                     kind="agent.completed",
@@ -746,6 +751,18 @@ class InitiativeOrchestrator:
                 },
             )
         )
+
+
+def _persist_worker_status(frontier: Frontier, ticket_id: str, status: str) -> None:
+    persisted_status = {
+        "incomplete": "in-progress",
+        "ready-for-verification": "ready-for-verification",
+        "awaiting-user-verification": "awaiting-user-verification",
+        "completed": "completed",
+        "blocked": "blocked",
+    }.get(status)
+    if persisted_status is not None:
+        frontier.set_status(ticket_id, persisted_status)
 
 
 def _is_affirmative(answer: str) -> bool:

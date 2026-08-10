@@ -73,9 +73,9 @@ class LoopConfig:
             AgentRole.VERIFIER: self.verifier_model,
         }[role]
         defaults = {
-            AgentRole.COORDINATOR: "gpt-5.6-sol",
-            AgentRole.EXECUTOR: "gpt-5.6-terra",
-            AgentRole.VERIFIER: "gpt-5.6-sol",
+            AgentRole.COORDINATOR: "gpt-5.6-luna",
+            AgentRole.EXECUTOR: "gpt-5.6-luna",
+            AgentRole.VERIFIER: "gpt-5.6-luna",
         }
         return specific or self.model or defaults[role]
 
@@ -86,9 +86,9 @@ class LoopConfig:
             AgentRole.VERIFIER: self.verifier_reasoning_effort,
         }[role]
         defaults = {
-            AgentRole.COORDINATOR: "high",
+            AgentRole.COORDINATOR: "medium",
             AgentRole.EXECUTOR: "medium",
-            AgentRole.VERIFIER: "high",
+            AgentRole.VERIFIER: "medium",
         }
         return specific or self.reasoning_effort or defaults[role]
 
