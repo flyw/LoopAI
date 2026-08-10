@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "select-ticket",
+        "start-executor",
+        "resume-executor",
+        "start-verifier",
+        "resume-verifier",
+        "ask-user",
+        "enter-grill",
+        "await-user",
+        "stop",
+        "complete-initiative"
+      ]
+    },
+    "ticket_id": { "type": ["string", "null"] },
+    "session_id": { "type": ["string", "null"] },
+    "reason": { "type": "string", "minLength": 1 },
+    "feedback": { "type": ["string", "null"] }
+    ,
+    "question": { "type": ["string", "null"] },
+    "recommended_answer": { "type": ["string", "null"] }
+  },
+  "required": [
+    "action",
+    "ticket_id",
+    "session_id",
+    "reason",
+    "feedback",
+    "question",
+    "recommended_answer"
+  ]
+}

@@ -1,0 +1,370 @@
+# LoopAI agent loop
+
+一个由 Python `asyncio` 驱动的 spec-first 开发循环。调用方不指定具体 ticket；工具从
+initiative 的 `spec.md` 出发，读取同目录 `README.md` 中的 CropAI 风格 Ticket Index，
+按照 blocker/frontier 顺序完成全部 ticket。
+
+每个 initiative 使用一个 Coordinator，并为每个 ticket 使用两个独立 agent：
+
+1. Coordinator 的启动 Prompt 第一行显式调用
+   `$flyw:agent-initiative-orchestrator` skill。它检查 tracker、repository 和两个 agent 的
+   最新状态，选择下一步受限动作；同一次运行内始终恢复同一个 Coordinator session。
+2. Executor 的启动 Prompt 第一行显式调用 `$flyw:agent-ticket-executor` skill。
+3. Verifier 的启动 Prompt 第一行显式调用 `$flyw:agent-ticket-verifier` skill 独立复验。
+4. Verifier 返回 `incomplete` 时，反馈先交给 Coordinator，再送回同一个 Executor session，
+   随后由同一个 Verifier
+   session 复验。
+   Executor 自己返回 `incomplete` 时也会自动恢复同一个 Executor session 重试，不会立即
+   结束 initiative。
+5. 只有当前 ticket 为 `completed` 才选择下一个依赖已解锁的 ticket；否则整个 initiative
+   停止，绝不越过失败继续下游。
+
+Coordinator 只能返回 schema 中声明的动作。Python 安全层会机械校验当前 ticket、依赖、
+角色切换和 resume session ID；模型不能跳过 blocker、绕过独立验证或自行宣告完成。
+程序重启后会重新读取 execution map，跳过 `completed`，并对
+`ready-for-verification` 直接启动 Verifier，不会从第一张 ticket 重做。Coordinator session
+ID 会保存在当前 initiative 的 `.loopai/sessions.json`。保存的 session 无法恢复时，会启动
+新 session，并用持久化问答和当前 repository 状态重建上下文。
+
+## Coordinator 人工决策与 Grill
+
+Coordinator 会优先自行检查 repository 和 tracker。缺少会改变范围、行为、风险或验收方式
+的用户决策时返回 `ask-user`；需要用户提供外部验证证据或授权时返回 `await-user`。两者都会
+在普通终端显示输入框并在回答后恢复同一个 Coordinator session，不会直接结束。你也可以输入 `grill me`，
+或确认 Coordinator 的 `enter-grill` 建议，进入由
+`$mattpocock-skills:grilling` 驱动的多轮决策树访谈。Grill 清空所有决策分支后会显示最终方案，
+只有你明确确认才继续执行。
+
+输入框支持：
+
+- `/status`：查看当前问答状态；
+- `/back`：要求 Coordinator 回到上一项回答；
+- `/cancel`：安全停止当前 initiative。
+
+如果模型没有填写 `question`，LoopAI 会根据 `reason` 和 `feedback` 自动生成问题。非交互
+环境或 `--json` 模式不会读取终端，改为发出 `user.input.required` 事件并以
+`awaiting-user-input` 停止。提交回答后恢复：
+
+```bash
+loopai \
+  --workspace ../CropAI \
+  --spec .scratch/cropai-mvp/spec.md \
+  --answer "采用 Coordinator 推荐方案"
+```
+
+可以重复 `--answer` 为脚本化运行提供多轮回答。不要在回答中输入密码、API key 或凭据。
+
+每个 initiative 的本机状态完全隔离：
+
+```text
+initiative/.loopai/
+├── conversation.json
+├── sessions.json
+└── active.lock
+```
+
+不同 workspace 或 initiative 可以并行运行；同一 initiative 的第二个进程会被锁拒绝。
+`.loopai/` 会写入该 workspace 的 `.git/info/exclude`，不会修改团队共享的 `.gitignore`。
+
+三个角色的默认模型由 workspace 的 `.loopai/config.toml` 管理。Coordinator 和 Verifier
+默认使用 `gpt-5.6-sol` / `high`，Executor 默认使用 `gpt-5.6-terra` / `medium`。唯一的模型
+调用路径是本机
+`codex exec --json` 子进程；本项目不使用 OpenAI SDK、不直接请求 Responses API，也不读取
+API key。Codex 输出的每个 JSONL 事件都会通过异步迭代器立即转发。
+
+Codex 的单条 JSONL 事件可能包含较大的命令输出。子进程读取上限默认为 64 MiB，避免
+Python `asyncio` 默认 64 KiB 行限制中断长事件，同时保持逐事件流式转发。
+
+## 预期目录结构
+
+与 `../CropAI/.scratch/cropai-mvp` 一致：
+
+```text
+initiative/
+├── spec.md
+├── README.md              # 含 Ticket Index 表格、Status、Blocked by
+├── issues/
+│   ├── 01-first.md
+│   └── 02-second.md
+└── artifacts/
+```
+
+工具以 Ticket Index 的表格顺序作为同一 frontier 内的稳定选择顺序，并使用 `Blocked by`
+构建依赖图。它会：
+
+- 校验 ticket 文件、重复 ID、未知 blocker 和依赖环；
+- 跳过 tracker 中已经 `completed` 的 ticket；
+- 每完成一票后重新读取 README，获取 verifier 更新后的 frontier；
+- Verifier 声称完成但未把 tracker 持久化为 `completed` 时立即停止；
+- 自动恢复 `ready-for-verification` 的票，只启动 Verifier；
+- 当有多个 `spec.md` 时要求用 `--spec` 消除歧义。
+
+## 前置条件
+
+- Python 3.9+
+- 已安装 `codex` CLI
+- 已通过 `codex login` 完成本机 Codex 登录
+- 已安装 `flyw:agent-initiative-orchestrator`、`flyw:agent-ticket-executor` 和
+  `flyw:agent-ticket-verifier` skills
+- 需要 Grill 模式时已安装 `mattpocock-skills:grilling` skill
+- 目标 workspace 是 Git repository（三个 skills 需要读取真实 repository 状态）
+
+## 安装与运行
+
+LoopAI 需要 Python 3.9+、Codex CLI 和已登录的本机 Codex 环境。先完成：
+
+```bash
+codex login
+```
+
+以下安装方式任选其一。
+
+### 方式一：使用 uv 安装 CLI（推荐）
+
+`uv` 会创建独立环境，并根据 `pyproject.toml` 安装依赖；Python 3.9/3.10 会自动安装
+`tomli`。
+
+如果尚未安装 uv（macOS + Homebrew）：
+
+```bash
+brew install uv
+```
+
+安装 LoopAI：
+
+```bash
+cd /path/to/LoopAI
+uv tool install --editable .
+```
+
+代码或依赖更新后，强制刷新已有工具环境：
+
+```bash
+uv tool install --force --editable /path/to/LoopAI
+```
+
+验证：
+
+```bash
+loopai --help
+```
+
+### 方式二：使用 Python 虚拟环境和 pip
+
+```bash
+cd /path/to/LoopAI
+python3 -m venv .venv
+.venv/bin/python -m pip install -e .
+.venv/bin/loopai --help
+```
+
+如果希望在任意目录直接使用该虚拟环境中的命令，可以把它加入当前 shell 的 `PATH`：
+
+```bash
+export PATH="/path/to/LoopAI/.venv/bin:$PATH"
+cd /path/to/your/workspace
+loopai
+```
+
+### 方式三：构建 macOS 单文件版本
+
+这种方式不安装 LoopAI Python 包，生成的可执行文件可以复制到其他目录使用：
+
+```bash
+cd /path/to/LoopAI
+python3 -m pip install pyinstaller
+sh scripts/build-macos.sh
+```
+
+构建产物为 `dist/loopai`。当前 Mac 为 Apple Silicon 时产物是 `arm64`；Intel Mac 需要在
+Intel Mac 上重新构建。
+
+从任意目录运行：
+
+```bash
+cd /tmp
+/path/to/LoopAI/dist/loopai --workspace /path/to/your/workspace
+```
+
+也可以把构建产物目录加入 `PATH`，直接输入 `loopai`：
+
+```bash
+export PATH="/path/to/LoopAI/dist:$PATH"
+cd /path/to/your/workspace
+loopai
+```
+
+单文件版本不包含 Codex CLI、登录状态或 workspace 内容；运行机器仍需安装 Codex CLI 并
+执行 `codex login`。
+
+### 选择 spec
+
+当 workspace 下只有一个 `spec.md` 时，可以省略 `--spec`。有多个 spec 时，先查看路径：
+
+```bash
+rg --files .scratch | rg '/spec\.md$'
+```
+
+然后指定要执行的 initiative：
+
+```bash
+loopai \
+  --workspace /path/to/LoopAI \
+  --spec .scratch/recording-dataset-management/spec.md
+```
+
+相对 `--spec` 路径会以 `--workspace` 为基准解析；也可以直接传入 spec 的绝对路径。
+
+### 三个 Agent 的模型配置
+
+第一次在 workspace 中启动 `loopai` 时，会自动创建：
+
+```text
+<workspace>/.loopai/config.toml
+```
+
+默认内容：
+
+```toml
+[coordinator]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+# startup_prompt = """请使用中文与用户交互。"""
+
+[executor]
+model = "gpt-5.6-terra"
+reasoning_effort = "medium"
+
+[verifier]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+```
+
+首次创建后会继续运行；编辑该文件后，下次启动生效。配置严格校验，未知 section/key、
+空 model、非法 TOML 或不支持的 reasoning effort 会在启动 Agent 前报错。
+
+Coordinator 还可以配置通用启动提示，例如：
+
+```toml
+[coordinator]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+startup_prompt = """
+请使用中文与用户交互。
+提问时尽量简洁，并给出推荐答案。
+"""
+```
+
+`startup_prompt` 只在创建新的 Coordinator 会话时注入；有效会话恢复时不会重复注入。
+如果已保存的 Coordinator 会话失效并被替换，新会话会再次收到该提示。Executor 和
+Verifier 不会收到它。
+
+临时覆盖全部角色：
+
+```bash
+loopai --workspace . --model gpt-5.6-luna --reasoning-effort medium
+```
+
+只覆盖某个角色：
+
+```bash
+loopai \
+  --workspace . \
+  --coordinator-model gpt-5.6-sol \
+  --coordinator-reasoning-effort max \
+  --executor-model gpt-5.6-terra \
+  --verifier-model gpt-5.6-sol
+```
+
+配置优先级：
+
+```text
+角色 CLI 参数 > 全局 CLI 参数 > workspace TOML > 内置角色默认值
+```
+
+当 workspace 内只有一个 `spec.md` 时，无需提供 spec 或 ticket：
+
+```bash
+loopai --workspace ../CropAI
+```
+
+有多个 spec 时只选择 initiative，而不是选择 ticket：
+
+```bash
+loopai \
+  --workspace ../CropAI \
+  --spec .scratch/cropai-mvp/spec.md
+```
+
+默认输出为精简的人类可读进度。需要供 SSE、WebSocket、日志处理器或消息总线消费的完整
+JSONL 时，使用 `--json`：
+
+```bash
+loopai --json --workspace ../CropAI > loopai-events.jsonl
+```
+
+实际启动的新 Agent 命令等价于：
+
+```bash
+codex exec \
+  --json \
+  --model gpt-5.6-luna \
+  -c 'model_reasoning_effort="medium"' \
+  --approve-for-me \
+  --cd ../CropAI \
+  -
+```
+
+后续轮次通过 `codex exec resume <session-id> -` 恢复同一个 Executor 或 Verifier。Prompt
+始终经标准输入传递，不经过 shell 拼接。
+
+## Python 响应式接口
+
+```python
+import asyncio
+from pathlib import Path
+
+from loopai import InitiativeOrchestrator, LoopConfig
+
+
+async def main() -> None:
+    config = LoopConfig(
+        workspace=Path("../CropAI"),
+        model="gpt-5.6-luna",
+        reasoning_effort="medium",
+        max_rounds=3,
+    )
+    orchestrator = InitiativeOrchestrator(config)
+    async for event in orchestrator.stream(
+        Path(".scratch/cropai-mvp/spec.md")
+    ):
+        print(event.as_dict())
+
+
+asyncio.run(main())
+```
+
+主要事件：
+
+- `initiative.started`
+- `ticket.started`
+- `agent.event`：Codex 原始 JSONL
+- `agent.stderr`
+- `agent.completed`
+- `ticket.completed`
+- `initiative.completed`
+
+只有整个 initiative 的所有 ticket 都完成时 CLI 返回 `0`。等待人工验证、阻塞、失败或达到
+最大轮次时返回 `1`；输入、tracker 或进程错误返回 `2`。
+
+## 示例与测试
+
+[examples/spec.md](examples/spec.md) 和 [examples/README.md](examples/README.md) 展示了两张
+具有依赖关系的 ticket。示例需求是占位内容，不建议直接交给 agent 修改本仓库。
+
+测试不会连接模型：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
+  python3 -m unittest discover -s tests -v
+```
