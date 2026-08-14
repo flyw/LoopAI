@@ -28,8 +28,8 @@ class WorkingDirectoryConfigurationTests(unittest.TestCase):
             config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
-                '[executor]\nmodel = "gpt-5.6-luna"',
-                '[executor]\nmodel = "custom-executor"',
+                '[executor]\nmodel = "gpt-5.6-luna"\nreasoning_effort = "medium"',
+                '[executor]\nmodel = "custom-executor"\nreasoning_effort = "medium"',
             )
             config = config_dir / "config.toml"
             config.write_text(custom, encoding="utf-8")
