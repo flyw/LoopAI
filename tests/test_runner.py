@@ -14,11 +14,11 @@ class CodexRunnerTests(TestCase):
         self.working_directory = Path.cwd()
         self.runner = CodexRunner(LoopConfig(working_directory=self.working_directory))
 
-    def test_new_session_command_sets_model_effort_working_directory_and_automatic_approval(self) -> None:
+    def test_new_session_command_sets_effort_working_directory_and_automatic_approval(self) -> None:
         command = self.runner.build_command(AgentRole.EXECUTOR)
 
         self.assertEqual(command[:2], ["codex", "exec"])
-        self.assertIn("gpt-5.6-luna", command)
+        self.assertNotIn("--model", command)
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--approve-for-me", command)
         self.assertNotIn("--sandbox", command)
@@ -39,17 +39,27 @@ class CodexRunnerTests(TestCase):
         schema = command[command.index("--output-schema") + 1]
         self.assertTrue(schema.endswith("schemas/coordinator.json"))
 
-    def test_each_role_uses_its_own_default_model_and_effort(self) -> None:
-        expected = {
-            AgentRole.COORDINATOR: ("gpt-5.6-luna", "medium"),
-            AgentRole.EXECUTOR: ("gpt-5.6-luna", "medium"),
-            AgentRole.VERIFIER: ("gpt-5.6-luna", "medium"),
-        }
-
-        for role, (model, effort) in expected.items():
+    def test_each_role_uses_codex_default_model_and_configured_effort(self) -> None:
+        for role in AgentRole:
             command = self.runner.build_command(role)
-            self.assertEqual(command[command.index("--model") + 1], model)
-            self.assertIn(f'model_reasoning_effort="{effort}"', command)
+            self.assertNotIn("--model", command)
+            self.assertIn('model_reasoning_effort="medium"', command)
+
+    def test_explicit_model_is_passed_to_codex(self) -> None:
+        runner = CodexRunner(
+            LoopConfig(working_directory=self.working_directory, model="public-model")
+        )
+
+        command = runner.build_command(AgentRole.EXECUTOR)
+
+        self.assertEqual(command[command.index("--model") + 1], "public-model")
+
+    def test_automatic_approval_can_be_disabled(self) -> None:
+        runner = CodexRunner(
+            LoopConfig(working_directory=self.working_directory, automatic_approval=False)
+        )
+
+        self.assertNotIn("--approve-for-me", runner.build_command(AgentRole.EXECUTOR))
 
     def test_role_setting_overrides_global_setting(self) -> None:
         runner = CodexRunner(
@@ -87,6 +97,10 @@ class CodexRunnerTests(TestCase):
 
         self.assertFalse(defaults.json)
         self.assertTrue(json_output.json)
+        self.assertTrue(defaults.automatic_approval)
+        self.assertFalse(
+            build_parser().parse_args(["--no-automatic-approval"]).automatic_approval
+        )
         self.assertEqual(build_parser().parse_args(["--answer", "yes"]).answer, ["yes"])
 
     def test_cli_role_override_beats_global_and_working_directory_toml(self) -> None:

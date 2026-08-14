@@ -28,6 +28,7 @@ class LoopConfig:
     verifier_reasoning_effort: str | None = None
     max_rounds: int = 3
     codex_binary: str = "codex"
+    automatic_approval: bool = True
     subprocess_stream_limit: int = 64 * 1024 * 1024
     max_questions: int = 20
 
@@ -66,18 +67,13 @@ class LoopConfig:
             raise ValueError("coordinator startup prompt must be a string")
         object.__setattr__(self, "working_directory", working_directory)
 
-    def model_for(self, role: AgentRole) -> str:
+    def model_for(self, role: AgentRole) -> str | None:
         specific = {
             AgentRole.COORDINATOR: self.coordinator_model,
             AgentRole.EXECUTOR: self.executor_model,
             AgentRole.VERIFIER: self.verifier_model,
         }[role]
-        defaults = {
-            AgentRole.COORDINATOR: "gpt-5.6-luna",
-            AgentRole.EXECUTOR: "gpt-5.6-luna",
-            AgentRole.VERIFIER: "gpt-5.6-luna",
-        }
-        return specific or self.model or defaults[role]
+        return specific or self.model
 
     def reasoning_effort_for(self, role: AgentRole) -> str:
         specific = {
@@ -103,6 +99,7 @@ class StreamEvent:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": 1,
             "kind": self.kind,
             "ticket": str(self.ticket) if self.ticket else None,
             "role": self.role.value if self.role else None,

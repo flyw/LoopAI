@@ -77,7 +77,7 @@ class StatusFile:
                     "with the result.",
                     "",
                     "```bash",
-                    'loopai --answer "外层 Agent 已完成处理，请继续执行"',
+                    'loopai --answer "The external action is complete. Please continue."',
                     "```",
                 ]
             )

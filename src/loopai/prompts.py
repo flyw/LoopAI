@@ -3,12 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 
-COORDINATOR_SKILL = "$flyw:agent-initiative-orchestrator"
-EXECUTOR_SKILL = "$flyw:agent-ticket-executor"
-VERIFIER_SKILL = "$flyw:agent-ticket-verifier"
-GRILLING_SKILL = "$mattpocock-skills:grilling"
-
-
 def coordinator_prompt(
     *,
     spec: Path,
@@ -23,20 +17,20 @@ def coordinator_prompt(
     startup_prompt: str | None = None,
 ) -> str:
     target = "none" if ticket is None else str(ticket)
-    additional = (
-        ""
-        if startup_prompt is None or not startup_prompt.strip()
-        else (
-            "\nWorking-directory Coordinator instructions (apply to every Coordinator turn):\n"
-            f"{startup_prompt.strip()}\n"
-        )
-    )
-    return f"""{COORDINATOR_SKILL}
+    additional = _startup_prompt(startup_prompt)
+    return f"""Role: Planner
 
-Load and follow the explicitly invoked initiative orchestrator skill before deciding.
+You coordinate one spec-first initiative. Inspect the repository and durable tracker before making
+a decision. Choose exactly one safe next action and return an object matching the supplied Planner
+JSON schema.
 
-Inspect the current repository and durable tracker rather than assuming work starts at the first
-ticket. Choose exactly one safe next action and match the supplied JSON schema.
+Planner responsibilities:
+- Reconstruct progress from repository state, the tracker, and persisted conversation context.
+- Select only the deterministic action recommended by the safety layer when the evidence supports it.
+- Preserve dependency order, independent verification, and the existing agent session ids.
+- Ask the Outer Agent for evidence or authority when it is required for safe continuation.
+- Hand control back to the Outer Agent whenever continuation is unsafe. LoopAI persists the handoff,
+  writes LOOPAI_STATUS.md, and exits instead of waiting for terminal input.
 
 Initiative spec: {spec}
 Durable LoopAI tracker: {execution_map}
@@ -49,12 +43,10 @@ Deterministic safety layer recommendation: {recommended_action}
 Latest observation:
 {observation}
 
-Use repository facts to assess the recommendation. Select `await-user` with a concrete `question`
-when external evidence or authority could unblock progress. Select `stop` only when another Outer
-Agent intervention is needed before continuation is safe. LoopAI persists a handoff and exits
-instead of waiting for a terminal prompt. The Python safety layer will reject actions that violate
-the dependency, role, or completion gates. Put concise evidence in `reason` and agent-ready guidance
-in `feedback`.
+Use `await-user` with a concrete question when external evidence or authority is needed. Use `stop`
+when another Outer Agent intervention is needed before continuation is safe. Put concise evidence in
+`reason` and agent-ready guidance in `feedback`. The Python safety layer validates ticket, dependency,
+role-transition, and session rules.
 {additional}
 """
 
@@ -70,23 +62,18 @@ def coordinator_response_prompt(
     verifier_session_id: str | None,
     startup_prompt: str | None = None,
 ) -> str:
-    skill = GRILLING_SKILL if grill_mode else COORDINATOR_SKILL
-    instructions = (
-        ""
-        if startup_prompt is None or not startup_prompt.strip()
-        else (
-            "\nWorking-directory Coordinator instructions (apply to every Coordinator turn):\n"
-            f"{startup_prompt.strip()}\n"
-        )
+    role = "Role: Planner (Grill mode)" if grill_mode else "Role: Planner"
+    grill_instructions = (
+        "In Grill mode, walk the decision tree one complete round at a time, expose assumptions, "
+        "and request confirmation of the final plan before execution."
+        if grill_mode
+        else "Continue the normal Planner decision process."
     )
-    return f"""{skill}
+    return f"""{role}
 
-Continue the same Coordinator decision process with the Outer Agent's handoff result below. Re-read
-repository state when the result changes an assumption. In grill mode, recompute the decision-tree
-frontier, ask the next complete round when branches remain, and request explicit confirmation of the
-final plan before returning an execution action. If continuation is still unsafe, summarize the
-remaining blocker clearly; LoopAI will hand control back to the Outer Agent.
-{instructions}
+{grill_instructions} Re-read repository state when the Outer Agent result changes an assumption.
+If continuation remains unsafe, summarize the remaining blocker; LoopAI will hand control back to the
+Outer Agent.
 
 Outer Agent handoff result:
 {answer}
@@ -99,8 +86,9 @@ Candidate ticket id: {ticket_id or "none"}
 Executor session id: {executor_session_id or "none"}
 Verifier session id: {verifier_session_id or "none"}
 
-Return exactly one decision matching the supplied Coordinator JSON schema. Never include secrets
-in persisted feedback or request passwords, API keys, or credentials.
+Return exactly one decision matching the supplied Planner JSON schema. Keep persisted feedback concise
+and never request or include passwords, API keys, or credentials.
+{_startup_prompt(startup_prompt)}
 """
 
 
@@ -112,41 +100,42 @@ def executor_prompt(
     feedback = (
         "No previous feedback exists; this is the first execution attempt."
         if previous_feedback is None
-        else (
-            "Feedback from the previous incomplete executor or verifier attempt:\n"
-            f"{previous_feedback}"
-        )
+        else f"Feedback from the previous executor or verifier attempt:\n{previous_feedback}"
     )
-    return f"""{EXECUTOR_SKILL}
+    return f"""Role: Executor
 
-Load and follow the explicitly invoked executor skill before taking any ticket action.
-
-You are the sole executor agent for exactly this ticket:
+You are the sole Executor for exactly this ticket:
 {ticket}
 
 This is orchestration round {round_number}. {feedback}
 
-Read the ticket and every artifact it references. Work only inside the ticket's authorized
-scope. Implement and test the ticket, update only executor-owned handoff artifacts, and do not
-self-declare the ticket completed. Your final response must match the supplied JSON schema.
-Set `status` mechanically according to the skill. Include concise fresh evidence in `summary`.
+Read the ticket and every artifact it references. Work only inside the ticket's authorized scope.
+Implement the requested change and run the strongest relevant tests. Record fresh evidence in your
+final summary. Choose a status from the supplied Executor JSON schema based on the repository state.
+LoopAI owns the durable tracker and the final completion decision.
 """
 
 
 def verifier_prompt(ticket: Path, round_number: int, executor_summary: str) -> str:
-    return f"""{VERIFIER_SKILL}
+    return f"""Role: Independent Verifier
 
-Load and follow the explicitly invoked verifier skill before taking any verification action.
-
-You are the sole independent verifier agent for exactly this ticket:
+You are the independent Verifier for exactly this ticket:
 {ticket}
 
-This is orchestration round {round_number}. The executor reported:
+This is orchestration round {round_number}. The Executor reported:
 {executor_summary}
 
-Treat that report only as a claim. Inspect raw repository state and independently replay the
-required evidence. Do not modify product code. Update only verifier-owned artifacts; LoopAI owns
-the durable execution tracker and persists the returned status. Your final response must match the
-supplied JSON schema. Set `status` mechanically according to the skill and put actionable evidence
-or failure details in `summary`.
+Treat the report as a claim. Inspect raw repository state and independently replay the required
+evidence. Keep product code unchanged during verification. Record actionable evidence or failure
+details in your final summary and return a status matching the supplied Verifier JSON schema.
+LoopAI owns the durable tracker and persists the returned status.
 """
+
+
+def _startup_prompt(startup_prompt: str | None) -> str:
+    if startup_prompt is None or not startup_prompt.strip():
+        return ""
+    return (
+        "\nWorking-directory Planner instructions (apply to every Planner turn):\n"
+        f"{startup_prompt.strip()}\n"
+    )

@@ -1,59 +1,172 @@
-# LoopAI agent loop
+# LoopAI
 
-一个由 Python `asyncio` 驱动的 spec-first 开发循环。调用方不指定具体 ticket；工具从
-initiative 的 `spec.md` 出发，自动扫描同目录 `issues/*.md` 中的 ticket 元数据，创建并维护
-`.loopai/execution.json`，再按照 blocker/frontier 顺序完成全部 ticket。initiative 的
-`README.md` 只作为人类说明文档，不参与执行。
+LoopAI is a spec-first, resumable orchestration loop for coding agents.
 
-每个 initiative 使用一个 Coordinator，并为每个 ticket 使用两个独立 agent：
+It coordinates a Planner, an Executor, and an independent Verifier to implement tickets in
+dependency order. When progress is blocked, LoopAI writes a durable handoff summary and returns
+control to the outer agent instead of waiting for terminal input.
 
-1. Coordinator 的启动 Prompt 第一行显式调用
-   `$flyw:agent-initiative-orchestrator` skill。它检查 tracker、repository 和两个 agent 的
-   最新状态，选择下一步受限动作；同一次运行内始终恢复同一个 Coordinator session。
-2. Executor 的启动 Prompt 第一行显式调用 `$flyw:agent-ticket-executor` skill。
-3. Verifier 的启动 Prompt 第一行显式调用 `$flyw:agent-ticket-verifier` skill 独立复验。
-4. Verifier 返回 `incomplete` 时，反馈先交给 Coordinator，再送回同一个 Executor session，
-   随后由同一个 Verifier
-   session 复验。
-   Executor 自己返回 `incomplete` 时也会自动恢复同一个 Executor session 重试，不会立即
-   结束 initiative。
-5. 只有当前 ticket 为 `completed` 才选择下一个依赖已解锁的 ticket；否则整个 initiative
-   停止，绝不越过失败继续下游。
+> LoopAI is currently alpha software. It runs local Codex CLI sessions and can modify the project
+> directory. Review the [security model](#security-model) before using it on an untrusted project.
 
-Coordinator 只能返回 schema 中声明的动作。Python 安全层会机械校验当前 ticket、依赖、
-角色切换和 resume session ID；模型不能跳过 blocker、绕过独立验证或自行宣告完成。
-程序重启后会重新读取 `.loopai/execution.json`，跳过 `completed`，并对
-`ready-for-verification` 直接启动 Verifier，不会从第一张 ticket 重做。Coordinator session
-ID 会保存在当前 initiative 的 `.loopai/sessions.json`。保存的 session 无法恢复时，会启动
-新 session，并用持久化问答和当前 repository 状态重建上下文。
+## What it does
 
-## Planner 决策、Grill 与外层 Agent 交接
+- Discovers an initiative from `spec.md` and `issues/*.md`.
+- Builds and validates the ticket dependency frontier.
+- Runs one Planner session for orchestration.
+- Runs a dedicated Executor and an independent Verifier for each ticket.
+- Persists tracker state and agent sessions under the initiative's `.loopai/` directory.
+- Resumes completed and verification-ready work after a process restart.
+- Emits JSONL events for scripts, CI jobs, and outer agents.
+- Hands control back to an outer agent through `LOOPAI_STATUS.md` when a decision, external action,
+  verification result, or safe stopping point is required.
 
-Coordinator 是 LoopAI 的 Planner。它会优先检查 repository 和 tracker；缺少会改变范围、行为、
-风险或验收方式的决策时返回 `ask-user`，需要外部验证证据或授权时返回 `await-user`。Grill 模式
-仍由 `$mattpocock-skills:grilling` 驱动，但 LoopAI 不再在进程内显示输入框或等待终端输入。
+LoopAI does not call an LLM API directly. It starts the local `codex exec --json` command and streams
+the resulting events. Authentication, provider configuration, network behavior, and data handling
+therefore come from the Codex CLI and its configured provider.
 
-任何无法安全继续的情况都会：
+## Requirements
 
-- 由 Planner 总结当前状态和阻塞原因；
-- 在当前启动目录写入 `LOOPAI_STATUS.md`；
-- 发出 `initiative.handoff` 事件并退出，退出码为 `1`。
+- Python 3.9 or newer for the core CLI.
+- Codex CLI installed and authenticated on the machine running LoopAI.
+- A project directory containing an initiative spec. Git is recommended but is not required by the
+  CLI boundary.
 
-外层 Agent 处理完状态文件中的事项后，在同一个项目目录中使用 `--answer` 恢复：
+The default prompts are self-contained. LoopAI does not require private or third-party skills.
+
+## Install
+
+### Install from a local checkout
+
+The `pyproject.toml` file registers the `loopai` console command.
+
+With [uv](https://docs.astral.sh/uv/):
 
 ```bash
-loopai \
-  --spec .scratch/cropai-mvp/spec.md \
-  --answer "已完成外部处理，请重新检查并继续"
+uv tool install --editable /absolute/path/to/LoopAI
+uv tool update-shell
+loopai --version
 ```
 
-`--answer` 是传给 Planner 的自由文本，可重复使用以提供脚本化的多轮结果。没有待恢复的
-handoff 时传入 `--answer` 会报错。不要在回答中输入密码、API key 或凭据。
+With [pipx](https://pipx.pypa.io/):
 
-`LOOPAI_STATUS.md` 是外层 Agent 的快速入口，包含 initiative、当前 ticket、完成进度、Planner
-总结、阻塞原因和下一次恢复命令。详细的持久化上下文仍在 initiative 的 `.loopai/` 目录中。
+```bash
+pipx install /absolute/path/to/LoopAI
+pipx ensurepath
+loopai --version
+```
 
-每个 initiative 的本机状态完全隔离：
+To install the optional MCP adapter in the same persistent environment, include the MCP extra:
+
+```bash
+uv tool install --with "mcp>=2,<3" --editable /absolute/path/to/LoopAI
+# or
+pipx install "/absolute/path/to/LoopAI[mcp]"
+```
+
+`uv tool install` puts the package's console scripts in an isolated environment and exposes them
+on `PATH` after `uv tool update-shell`; `pipx ensurepath` does the equivalent for pipx.
+
+The command and the Python package have different names: the distribution is
+`loopai-agent-loop`, while the executable is `loopai`.
+
+### Install from PyPI
+
+After a release is published:
+
+```bash
+uv tool install loopai-agent-loop
+# or
+pipx install loopai-agent-loop
+```
+
+For the MCP adapter, install the optional extra:
+
+```bash
+uv tool install 'loopai-agent-loop[mcp]'
+# or
+pipx install 'loopai-agent-loop[mcp]'
+```
+
+### Run directly from GitHub
+
+This is useful for an outer agent or CI job that should not install a persistent global command:
+
+```bash
+uvx \
+  --from git+https://github.com/flyw/LoopAI.git \
+  loopai \
+  --json
+```
+
+The host process must still provide a working Codex CLI and authentication.
+
+## Quick start
+
+An initiative has one `spec.md` and one `issues/` directory:
+
+```text
+my-project/
+├── spec.md
+├── README.md                 # optional human documentation
+├── issues/
+│   ├── 01-foundation.md
+│   └── 02-follow-up.md
+└── artifacts/
+```
+
+Each ticket file starts with a numeric id. Optional metadata defines its initial status and
+dependencies:
+
+```markdown
+# Add the foundation
+
+**Status:** ready-for-agent
+**Blocked by:**
+
+Implement the foundation described by the initiative spec.
+```
+
+Run LoopAI from the project directory. The process working directory is the project boundary;
+there is no separate public `workspace` argument:
+
+```bash
+cd /absolute/path/to/my-project
+loopai --spec spec.md
+```
+
+When the directory contains exactly one `spec.md`, `--spec` may be omitted:
+
+```bash
+cd /absolute/path/to/my-project
+loopai
+```
+
+Relative spec paths are resolved from the process working directory and must stay inside it.
+
+## Planner handoff and resume
+
+LoopAI is deliberately non-interactive. If it cannot safely continue, it:
+
+1. asks the Planner to summarize the current repository and tracker state;
+2. atomically writes that summary to `LOOPAI_STATUS.md` in the process working directory;
+3. emits an `initiative.handoff` event; and
+4. exits with status code `1`.
+
+The outer agent should read the status file, perform the requested external action, and resume with
+the result:
+
+```bash
+cd /absolute/path/to/my-project
+loopai --answer "The external action is complete. Please re-check the repository and continue."
+```
+
+`--answer` can be supplied more than once for scripted multi-round handoffs. A supplied answer with
+no pending handoff is an error. Do not place passwords, API keys, or other credentials in an answer;
+the answer is persisted in the initiative conversation history.
+
+`LOOPAI_STATUS.md` is a fast outer-agent entry point. Detailed state remains under the initiative's
+`.loopai/` directory:
 
 ```text
 initiative/.loopai/
@@ -63,261 +176,164 @@ initiative/.loopai/
 └── active.lock
 ```
 
-`execution.json` 由 LoopAI 自动创建和更新，保存 ticket 的状态、路径和依赖关系。不同 initiative
-可以并行运行；同一 initiative 的第二个进程会被锁拒绝。`.loopai/` 和 `LOOPAI_STATUS.md` 会写入
-当前目录的 `.git/info/exclude`，不会修改团队共享的 `.gitignore`。
+LoopAI adds `.loopai/` and `LOOPAI_STATUS.md` to the local repository's `.git/info/exclude` when
+possible. It does not change the shared `.gitignore`.
 
-三个角色的默认模型由当前目录的 `.loopai/config.toml` 管理。Coordinator、Executor 和
-Verifier 默认都使用 `gpt-5.6-luna` / `medium`。唯一的模型
-调用路径是本机
-`codex exec --json` 子进程；本项目不使用 OpenAI SDK、不直接请求 Responses API，也不读取
-API key。Codex 输出的每个 JSONL 事件都会通过异步迭代器立即转发。
+## Machine-readable CLI protocol
 
-Codex 的单条 JSONL 事件可能包含较大的命令输出。子进程读取上限默认为 64 MiB，避免
-Python `asyncio` 默认 64 KiB 行限制中断长事件，同时保持逐事件流式转发。
-
-## 预期目录结构
-
-与 `../CropAI/.scratch/cropai-mvp` 一致：
-
-```text
-initiative/
-├── spec.md
-├── README.md              # 可选，仅供人类阅读
-├── issues/
-│   ├── 01-first.md        # 含 Status / Blocked by 元数据
-│   └── 02-second.md
-└── artifacts/
-```
-
-工具按 ticket 文件名中的数字 ID 和文件顺序建立稳定 frontier，并从 ticket 文件中的
-`Blocked by` 构建依赖图。它会：
-
-- 校验 ticket 文件、重复 ID、未知 blocker 和依赖环；
-- 首次启动时自动创建 `.loopai/execution.json`，之后保留已有状态；
-- 跳过 tracker 中已经 `completed` 的 ticket；
-- 每完成一票后由 LoopAI 自动把状态写入 tracker，再重新读取 frontier；
-- 如果 ticket 文件被删除，会停止并要求删除 tracker 后重新初始化，避免误丢失执行状态；
-- 自动恢复 `ready-for-verification` 的票，只启动 Verifier；
-- 当有多个 `spec.md` 时要求用 `--spec` 消除歧义。
-
-## 前置条件
-
-- Python 3.9+
-- 已安装 `codex` CLI
-- 已通过 `codex login` 完成本机 Codex 登录
-- 已安装 `flyw:agent-initiative-orchestrator`、`flyw:agent-ticket-executor` 和
-  `flyw:agent-ticket-verifier` skills
-- 需要 Grill 模式时已安装 `mattpocock-skills:grilling` skill
-- 当前启动目录是 Git repository（三个 skills 需要读取真实 repository 状态）
-
-## 安装与运行
-
-LoopAI 需要 Python 3.9+、Codex CLI 和已登录的本机 Codex 环境。先完成：
+Use `--json` when another program or agent is consuming the output:
 
 ```bash
-codex login
+loopai --json --spec spec.md
 ```
 
-以下安装方式任选其一。
+Every stdout line is a JSON object with `schema_version: 1`, `kind`, `ticket`, `role`, `round`, and
+`payload` fields. Important event kinds include:
 
-### 方式一：使用 uv 安装 CLI（推荐）
+- `initiative.started`
+- `ticket.started`
+- `agent.event` — raw Codex JSONL events
+- `agent.stderr`
+- `agent.completed`
+- `ticket.completed`
+- `user.input.required` — a machine-readable request immediately followed by handoff when no answer
+  provider is available
+- `initiative.completed`
+- `initiative.handoff`
 
-`uv` 会创建独立环境，并根据 `pyproject.toml` 安装依赖；Python 3.9/3.10 会自动安装
-`tomli`。
+The terminal event is the outer agent's control signal:
 
-如果尚未安装 uv（macOS + Homebrew）：
+| Exit code | Meaning | Outer-agent action |
+| --- | --- | --- |
+| `0` | The entire initiative completed | Continue with the next workflow step |
+| `1` | LoopAI handed control back safely | Read `LOOPAI_STATUS.md`, act, then resume |
+| `2` | Configuration, initialization, or runtime error | Report or repair the error |
 
-```bash
-brew install uv
-```
+Exit code `1` is an expected workflow result, not a process crash.
 
-安装 LoopAI：
+The complete outer-agent contract is in [docs/agent-integration.md](docs/agent-integration.md).
 
-```bash
-cd /path/to/LoopAI
-uv tool install --editable .
-```
+## Configuration
 
-代码或依赖更新后，强制刷新已有工具环境：
-
-```bash
-uv tool install --force --editable /path/to/LoopAI
-```
-
-验证：
-
-```bash
-loopai --help
-```
-
-### 方式二：使用 Python 虚拟环境和 pip
-
-```bash
-cd /path/to/LoopAI
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/loopai --help
-```
-
-如果希望在任意目录直接使用该虚拟环境中的命令，可以把它加入当前 shell 的 `PATH`：
-
-```bash
-export PATH="/path/to/LoopAI/.venv/bin:$PATH"
-cd /path/to/your/project
-loopai
-```
-
-### 方式三：构建 macOS 单文件版本
-
-这种方式不安装 LoopAI Python 包，生成的可执行文件可以复制到其他目录使用：
-
-```bash
-cd /path/to/LoopAI
-python3 -m pip install pyinstaller
-sh scripts/build-macos.sh
-```
-
-构建产物为 `dist/loopai`。当前 Mac 为 Apple Silicon 时产物是 `arm64`；Intel Mac 需要在
-Intel Mac 上重新构建。
-
-从项目目录运行：
-
-```bash
-cd /path/to/your/project
-/path/to/LoopAI/dist/loopai
-```
-
-也可以把构建产物目录加入 `PATH`，直接输入 `loopai`：
-
-```bash
-export PATH="/path/to/LoopAI/dist:$PATH"
-cd /path/to/your/project
-loopai
-```
-
-单文件版本不包含 Codex CLI、登录状态或项目内容；运行机器仍需安装 Codex CLI 并
-执行 `codex login`。
-
-### 选择 spec
-
-当当前目录下只有一个 `spec.md` 时，可以省略 `--spec`。有多个 spec 时，先查看路径：
-
-```bash
-rg --files .scratch | rg '/spec\.md$'
-```
-
-然后指定要执行的 initiative：
-
-```bash
-loopai \
-  --spec .scratch/recording-dataset-management/spec.md
-```
-
-相对 `--spec` 路径会以当前启动目录为基准解析，并且 spec 必须位于该目录内。
-
-### 三个 Agent 的模型配置
-
-第一次在当前目录启动 `loopai` 时，会自动创建：
-
-```text
-<current-directory>/.loopai/config.toml
-```
-
-默认内容：
+The first run creates `<current-directory>/.loopai/config.toml`:
 
 ```toml
+# Omit model to use the default configured by Codex CLI.
+
 [coordinator]
-model = "gpt-5.6-luna"
 reasoning_effort = "medium"
-startup_prompt = """请使用中文与用户交互。"""
+# model = "gpt-5-codex"
+# startup_prompt = "Use the user's language and keep questions concise."
 
 [executor]
-model = "gpt-5.6-luna"
 reasoning_effort = "medium"
+# model = "gpt-5-codex"
 
 [verifier]
-model = "gpt-5.6-luna"
 reasoning_effort = "medium"
+# model = "gpt-5-codex"
 ```
 
-首次创建后会继续运行；编辑该文件后，下次启动生效。配置严格校验，未知 section/key、
-空 model、非法 TOML 或不支持的 reasoning effort 会在启动 Agent 前报错。
-
-Coordinator 还可以配置通用启动提示，例如：
-
-```toml
-[coordinator]
-model = "gpt-5.6-luna"
-reasoning_effort = "medium"
-startup_prompt = """
-请使用中文与用户交互。
-提问时尽量简洁，并给出推荐答案。
-"""
-```
-
-`startup_prompt` 会注入每一次 Coordinator prompt，包括有效 session 的恢复调用；Executor 和
-Verifier 不会收到它。你可以把语言、提问方式和本项目的其他要求统一写在这里。
-
-临时覆盖全部角色：
-
-```bash
-loopai --model gpt-5.6-luna --reasoning-effort medium
-```
-
-只覆盖某个角色：
+Role-specific CLI options override global CLI options, which override this file:
 
 ```bash
 loopai \
-  --coordinator-model gpt-5.6-luna \
-  --coordinator-reasoning-effort max \
-  --executor-model gpt-5.6-luna \
-  --verifier-model gpt-5.6-luna
+  --model gpt-5-codex \
+  --reasoning-effort medium \
+  --coordinator-model gpt-5-codex \
+  --verifier-reasoning-effort high
 ```
 
-配置优先级：
+Useful runtime options:
 
 ```text
-角色 CLI 参数 > 全局 CLI 参数 > 当前目录 TOML > 内置角色默认值
+--spec PATH                         Select an initiative spec.
+--model MODEL                       Set the model for all roles.
+--coordinator-model MODEL           Override the Planner model.
+--executor-model MODEL              Override the Executor model.
+--verifier-model MODEL              Override the Verifier model.
+--reasoning-effort LEVEL             Set the effort for all roles.
+--max-rounds N                      Limit Executor/Verifier rounds per ticket.
+--max-questions N                   Limit Planner question rounds.
+--codex-binary PATH                 Select a Codex executable.
+--automatic-approval                Use Codex automatic approval (default).
+--no-automatic-approval             Do not pass Codex's automatic approval flag.
+--answer TEXT                      Provide an outer-agent handoff result.
+--json                             Emit JSONL events.
 ```
 
-当当前目录内只有一个 `spec.md` 时，无需提供 spec 或 ticket：
+## Security model
+
+LoopAI starts model-driven Codex sessions in the current project directory. By default it passes
+`--approve-for-me` for new sessions so the workflow can run without a terminal prompt. This lets the
+Codex approval reviewer authorize work in the configured write-access sandbox. Review the project,
+the initiative files, and the Codex configuration before enabling automatic execution.
+
+To omit that flag:
 
 ```bash
-cd ../CropAI
-loopai
+loopai --no-automatic-approval
 ```
 
-有多个 spec 时只选择 initiative，而不是选择 ticket：
+This mode may stop or fail if Codex requires an approval that cannot be answered non-interactively.
+Do not run LoopAI on untrusted repositories with credentials available to child processes.
+
+The outer-agent answer, Planner summaries, tracker state, and Codex session ids are local files.
+Avoid putting secrets in prompts, ticket files, `--answer`, or persisted startup prompts.
+
+## MCP integration
+
+The core CLI works with any Agent that can call shell commands. For hosts that expose native MCP
+tools, install the optional MCP extra on Python 3.10 or newer:
 
 ```bash
-loopai \
-  --spec .scratch/cropai-mvp/spec.md
+pip install "loopai-agent-loop[mcp]"
+loopai-mcp
 ```
 
-默认输出为精简的人类可读进度。需要供 SSE、WebSocket、日志处理器或消息总线消费的完整
-JSONL 时，使用 `--json`：
+`loopai-mcp` uses stdio and takes its project directory from its process `cwd`. It exposes one
+tool, `loopai_run`:
+
+```json
+{
+  "spec": "spec.md",
+  "answer": "The external action is complete. Please continue."
+}
+```
+
+Both fields are optional. An omitted `answer` starts or continues a normal turn. An `answer`
+resumes a pending handoff. The result is a compact object containing `status`, `cause`, progress,
+the current ticket, Planner summary, `status_file`, and the next action.
+
+Do not pass a project directory as a tool argument. Configure the MCP server's process working
+directory instead. For example, a Codex TOML configuration can use an absolute executable path:
+
+```toml
+[mcp_servers.loopai]
+command = "/absolute/path/to/loopai-mcp"
+cwd = "/absolute/path/to/my-project"
+```
+
+Or use `uvx` for a GitHub or PyPI installation:
+
+```toml
+[mcp_servers.loopai]
+command = "uvx"
+args = ["--from", "loopai-agent-loop[mcp]", "loopai-mcp"]
+cwd = "/absolute/path/to/my-project"
+```
+
+For an unreleased GitHub checkout, add the MCP SDK as an extra dependency explicitly:
 
 ```bash
-loopai --json > loopai-events.jsonl
+uvx --from git+https://github.com/flyw/LoopAI.git --with "mcp>=2,<3" loopai-mcp
 ```
 
-实际启动的新 Agent 命令等价于：
+MCP is an optional adapter around the same Python orchestrator. It does not create a second state
+model or a second working-directory concept. See [docs/mcp.md](docs/mcp.md) for the full adapter
+contract.
 
-```bash
-codex exec \
-  --json \
-  --model gpt-5.6-luna \
-  -c 'model_reasoning_effort="medium"' \
-  --approve-for-me \
-  --cd . \
-  -
-```
-
-后续轮次通过 `codex exec resume <session-id> -` 恢复同一个 Executor 或 Verifier。Prompt
-始终经标准输入传递，不经过 shell 拼接。
-
-## Python 响应式接口
+## Python API
 
 ```python
 import asyncio
@@ -327,45 +343,44 @@ from loopai import InitiativeOrchestrator, LoopConfig
 
 
 async def main() -> None:
+    project = Path.cwd()
     config = LoopConfig(
-        working_directory=Path("../CropAI"),
-        model="gpt-5.6-luna",
+        working_directory=project,
+        model="gpt-5-codex",             # optional; omit to use Codex CLI defaults
         reasoning_effort="medium",
         max_rounds=3,
     )
     orchestrator = InitiativeOrchestrator(config)
-    async for event in orchestrator.stream(
-        Path(".scratch/cropai-mvp/spec.md")
-    ):
+
+    async for event in orchestrator.stream(Path("spec.md")):
         print(event.as_dict())
 
 
 asyncio.run(main())
 ```
 
-主要事件：
+The library retains an `input_provider` seam for embedders and tests. The public CLI and MCP server
+use the outer-agent handoff protocol and never read terminal input.
 
-- `initiative.started`
-- `ticket.started`
-- `agent.event`：Codex 原始 JSONL
-- `agent.stderr`
-- `agent.completed`
-- `ticket.completed`
-- `initiative.completed`
-- `initiative.handoff`
+## Development
 
-只有整个 initiative 的所有 ticket 都完成时 CLI 返回 `0`。等待外层 Agent、阻塞、失败或达到
-最大轮次时发出 `initiative.handoff` 并返回 `1`；初始化、tracker 或配置错误返回 `2`。
-
-## 示例与测试
-
-[examples/spec.md](examples/spec.md)、[examples/README.md](examples/README.md) 和
-`examples/issues/*.md` 展示了两张具有依赖关系的 ticket。示例需求是占位内容，不建议直接
-交给 agent 修改本仓库。
-
-测试不会连接模型：
+Run the unit tests without connecting to Codex:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   python3 -m unittest discover -s tests -v
 ```
+
+Build the package:
+
+```bash
+python3 -m pip install build
+python3 -m build
+```
+
+The macOS single-file build remains available through `scripts/build-macos.sh`. It packages LoopAI,
+not Codex CLI or authentication, so the target machine still needs Codex CLI configured.
+
+## License
+
+LoopAI is released under the [MIT License](LICENSE).

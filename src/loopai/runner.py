@@ -24,14 +24,15 @@ class CodexRunner:
         schema = files("loopai").joinpath("schemas", f"{role.value}.json")
         shared = [
             "--json",
-            "--model",
-            self.config.model_for(role),
             "-c",
             f'model_reasoning_effort="{self.config.reasoning_effort_for(role)}"',
             "--skip-git-repo-check",
             "--output-schema",
             str(schema),
         ]
+        model = self.config.model_for(role)
+        if model is not None:
+            shared[1:1] = ["--model", model]
         if session_id:
             return [
                 self.config.codex_binary,
@@ -41,15 +42,17 @@ class CodexRunner:
                 session_id,
                 "-",
             ]
-        return [
+        command = [
             self.config.codex_binary,
             "exec",
             *shared,
-            "--approve-for-me",
             "--cd",
             str(self.config.working_directory),
             "-",
         ]
+        if self.config.automatic_approval:
+            command[3:3] = ["--approve-for-me"]
+        return command
 
     async def run(
         self,

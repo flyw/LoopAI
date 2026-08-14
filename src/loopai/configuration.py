@@ -22,25 +22,26 @@ ROLE_NAMES = ("coordinator", "executor", "verifier")
 
 DEFAULT_CONFIG = """# LoopAI per-role Codex settings.
 # CLI role options override global CLI options, which override this file.
+# Leave model commented out to use the default configured by Codex CLI.
 
 [coordinator]
-model = "gpt-5.6-luna"
 reasoning_effort = "medium"
-startup_prompt = \"\"\"请使用中文与用户交互。\"\"\"
+# model = "gpt-5-codex"
+# startup_prompt = "Use the user's language and keep questions concise."
 
 [executor]
-model = "gpt-5.6-luna"
 reasoning_effort = "medium"
+# model = "gpt-5-codex"
 
 [verifier]
-model = "gpt-5.6-luna"
 reasoning_effort = "medium"
+# model = "gpt-5-codex"
 """
 
 
 @dataclass(frozen=True)
 class RoleSettings:
-    model: str
+    model: str | None
     reasoning_effort: str
     startup_prompt: str | None = None
 
@@ -81,7 +82,7 @@ def load_working_directory_config(working_directory: Path) -> dict[str, RoleSett
             raise ValueError(
                 f"Unknown keys in [{role}] in {config_path}: {', '.join(unknown_keys)}"
             )
-        model = _required_string(raw, "model", role, config_path)
+        model = _optional_string(raw, "model", role, config_path)
         effort = _required_string(raw, "reasoning_effort", role, config_path)
         if effort not in SUPPORTED_REASONING_EFFORTS:
             choices = ", ".join(sorted(SUPPORTED_REASONING_EFFORTS))

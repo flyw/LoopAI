@@ -16,13 +16,10 @@ class WorkingDirectoryConfigurationTests(unittest.TestCase):
             config = working_directory / ".loopai" / "config.toml"
 
             self.assertEqual(config.read_text(encoding="utf-8"), DEFAULT_CONFIG)
-            self.assertEqual(settings["coordinator"].model, "gpt-5.6-luna")
-            self.assertEqual(
-                settings["coordinator"].startup_prompt,
-                "请使用中文与用户交互。",
-            )
-            self.assertEqual(settings["executor"].model, "gpt-5.6-luna")
-            self.assertEqual(settings["verifier"].model, "gpt-5.6-luna")
+            self.assertIsNone(settings["coordinator"].model)
+            self.assertIsNone(settings["coordinator"].startup_prompt)
+            self.assertIsNone(settings["executor"].model)
+            self.assertIsNone(settings["verifier"].model)
             self.assertEqual(settings["verifier"].reasoning_effort, "medium")
 
     def test_existing_configuration_is_loaded_without_overwrite(self) -> None:
@@ -31,8 +28,8 @@ class WorkingDirectoryConfigurationTests(unittest.TestCase):
             config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
-                '[executor]\nmodel = "gpt-5.6-luna"',
-                '[executor]\nmodel = "custom-executor"',
+                '[executor]\nreasoning_effort = "medium"',
+                '[executor]\nmodel = "custom-executor"\nreasoning_effort = "medium"',
             )
             config = config_dir / "config.toml"
             config.write_text(custom, encoding="utf-8")
@@ -75,8 +72,8 @@ class WorkingDirectoryConfigurationTests(unittest.TestCase):
             config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
-                'startup_prompt = """请使用中文与用户交互。"""',
-                'startup_prompt = """\n请使用中文与用户交互。\n提问保持简洁。\n"""',
+                '# startup_prompt = "Use the user\'s language and keep questions concise."',
+                'startup_prompt = """\nUse the user\'s language.\nKeep questions concise.\n"""',
             )
             (config_dir / "config.toml").write_text(custom, encoding="utf-8")
 
@@ -84,7 +81,7 @@ class WorkingDirectoryConfigurationTests(unittest.TestCase):
 
             self.assertEqual(
                 settings["coordinator"].startup_prompt,
-                "请使用中文与用户交互。\n提问保持简洁。",
+                "Use the user's language.\nKeep questions concise.",
             )
             self.assertIsNone(settings["executor"].startup_prompt)
 
@@ -94,7 +91,7 @@ class WorkingDirectoryConfigurationTests(unittest.TestCase):
             config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
-                'startup_prompt = """请使用中文与用户交互。"""',
+                '# startup_prompt = "Use the user\'s language and keep questions concise."',
                 "startup_prompt = 42",
             )
             (config_dir / "config.toml").write_text(custom, encoding="utf-8")
