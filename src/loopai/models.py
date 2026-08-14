@@ -28,6 +28,7 @@ class LoopConfig:
     verifier_reasoning_effort: str | None = None
     max_rounds: int = 3
     codex_binary: str = "codex"
+    automatic_approval: bool = True
     subprocess_stream_limit: int = 64 * 1024 * 1024
     max_questions: int = 20
 
@@ -103,6 +104,7 @@ class StreamEvent:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": 1,
             "kind": self.kind,
             "ticket": str(self.ticket) if self.ticket else None,
             "role": self.role.value if self.role else None,

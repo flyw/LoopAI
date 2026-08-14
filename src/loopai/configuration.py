@@ -26,7 +26,6 @@ DEFAULT_CONFIG = """# LoopAI per-role Codex settings.
 [coordinator]
 model = "gpt-5.6-luna"
 reasoning_effort = "medium"
-startup_prompt = \"\"\"请使用中文与用户交互。\"\"\"
 
 [executor]
 model = "gpt-5.6-luna"

@@ -9,6 +9,7 @@ from pathlib import Path
 from .configuration import load_working_directory_config
 from .models import LoopConfig
 from .orchestrator import InitiativeOrchestrator
+from .version import __version__
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Complete every ticket in a spec frontier with coordinator, executor, "
             "and verifier agents from the current working directory."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument(
         "--spec",
@@ -37,6 +43,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-rounds", type=int, default=3)
     parser.add_argument("--max-questions", type=int, default=20)
     parser.add_argument("--codex-binary", default="codex")
+    parser.add_argument(
+        "--automatic-approval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Allow Codex's automatic approval reviewer for non-interactive execution "
+            "(default: enabled)."
+        ),
+    )
     parser.add_argument(
         "--answer",
         action="append",
@@ -132,6 +147,7 @@ def config_from_args(args: argparse.Namespace) -> LoopConfig:
         max_rounds=args.max_rounds,
         max_questions=args.max_questions,
         codex_binary=args.codex_binary,
+        automatic_approval=args.automatic_approval,
     )
 
 

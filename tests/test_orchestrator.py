@@ -399,7 +399,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             )
             config = LoopConfig(
                 working_directory=working_directory,
-                coordinator_startup_prompt="请使用中文与用户交互。",
+                coordinator_startup_prompt="Use concise English.",
             )
             orchestrator = InitiativeOrchestrator(config, runner=runner)  # type: ignore[arg-type]
 
@@ -409,7 +409,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         coordinator_calls = calls_for(runner, AgentRole.COORDINATOR)
         prompts = [str(call["prompt"]) for call in coordinator_calls]
         self.assertEqual(
-            sum("请使用中文与用户交互。" in prompt for prompt in prompts),
+            sum("Use concise English." in prompt for prompt in prompts),
             len(prompts),
         )
         worker_prompts = [
@@ -418,7 +418,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             if call["role"] is not AgentRole.COORDINATOR
         ]
         self.assertTrue(
-            all("请使用中文与用户交互。" not in prompt for prompt in worker_prompts)
+            all("Use concise English." not in prompt for prompt in worker_prompts)
         )
 
     async def test_rejects_unsafe_coordinator_transition(self) -> None:
@@ -562,7 +562,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].payload["status"], "handoff")
         self.assertEqual(events[-1].payload["cause"], "blocked")
 
-    async def test_grill_mode_uses_grilling_skill_and_requires_final_confirmation(self) -> None:
+    async def test_grill_mode_uses_built_in_instructions_and_requires_final_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             working_directory = Path(directory)
             spec = create_initiative(working_directory)
@@ -579,7 +579,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             orchestrator = InitiativeOrchestrator(
                 LoopConfig(
                     working_directory=working_directory,
-                    coordinator_startup_prompt="请使用中文与用户交互。",
+                    coordinator_startup_prompt="Use concise English.",
                 ),
                 runner=runner,  # type: ignore[arg-type]
                 input_provider=provide_input,
@@ -589,7 +589,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         coordinator_calls = calls_for(runner, AgentRole.COORDINATOR)
         self.assertTrue(
             str(coordinator_calls[1]["prompt"]).startswith(
-                "$mattpocock-skills:grilling\n"
+                "Role: Planner (Grill mode)\n"
             )
         )
         input_events = [event for event in events if event.kind == "user.input.required"]
@@ -614,7 +614,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             orchestrator = InitiativeOrchestrator(
                 LoopConfig(
                     working_directory=working_directory,
-                    coordinator_startup_prompt="请使用中文与用户交互。",
+                    coordinator_startup_prompt="Use concise English.",
                 ),
                 runner=runner,  # type: ignore[arg-type]
                 input_provider=provide_input,
@@ -628,7 +628,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coordinator_calls[0]["session_id"], "coord-1")
         self.assertIsNone(coordinator_calls[1]["session_id"])
         self.assertIn("recent_answers", coordinator_calls[1]["prompt"])
-        self.assertIn("请使用中文与用户交互。", coordinator_calls[1]["prompt"])
+        self.assertIn("Use concise English.", coordinator_calls[1]["prompt"])
 
 
 if __name__ == "__main__":

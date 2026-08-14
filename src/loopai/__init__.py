@@ -4,6 +4,7 @@ from .models import AgentResult, AgentRole, LoopConfig, StreamEvent, TicketResul
 from .frontier import Frontier, TicketRecord
 from .orchestrator import InitiativeOrchestrator
 from .runner import CodexRunner
+from .version import __version__
 
 __all__ = [
     "AgentResult",
@@ -15,4 +16,5 @@ __all__ = [
     "StreamEvent",
     "TicketRecord",
     "TicketResult",
+    "__version__",
 ]
