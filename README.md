@@ -27,37 +27,31 @@ Coordinator 只能返回 schema 中声明的动作。Python 安全层会机械�
 ID 会保存在当前 initiative 的 `.loopai/sessions.json`。保存的 session 无法恢复时，会启动
 新 session，并用持久化问答和当前 repository 状态重建上下文。
 
-## Coordinator 人工决策与 Grill
+## Planner 决策、Grill 与外层 Agent 交接
 
-Coordinator 会优先自行检查 repository 和 tracker。缺少会改变范围、行为、风险或验收方式
-的用户决策时返回 `ask-user`；需要用户提供外部验证证据或授权时返回 `await-user`。两者都会
-在普通终端显示输入框并在回答后恢复同一个 Coordinator session，不会直接结束。你也可以输入 `grill me`，
-或确认 Coordinator 的 `enter-grill` 建议，进入由
-`$mattpocock-skills:grilling` 驱动的多轮决策树访谈。Grill 清空所有决策分支后会显示最终方案，
-只有你明确确认才继续执行。
+Coordinator 是 LoopAI 的 Planner。它会优先检查 repository 和 tracker；缺少会改变范围、行为、
+风险或验收方式的决策时返回 `ask-user`，需要外部验证证据或授权时返回 `await-user`。Grill 模式
+仍由 `$mattpocock-skills:grilling` 驱动，但 LoopAI 不再在进程内显示输入框或等待终端输入。
 
-输入框支持：
+任何无法安全继续的情况都会：
 
-- `/status`：查看当前问答状态；
-- `/back`：要求 Coordinator 回到上一项回答；
-- `/cancel`：安全停止当前 initiative。
+- 由 Planner 总结当前状态和阻塞原因；
+- 在当前启动目录写入 `LOOPAI_STATUS.md`；
+- 发出 `initiative.handoff` 事件并退出，退出码为 `1`。
 
-交互终端会在问题后留出空行，并显示单独的 `>` 输入提示。回答可以包含多行；输入完成后再
-输入一个空行提交，LoopAI 会把这些行作为一个完整回答交给 Coordinator。上述三个斜杠命令
-输入一行并回车即可立即生效。
-
-如果模型没有填写 `question`，LoopAI 会根据 `reason` 和 `feedback` 自动生成问题。非交互
-环境或 `--json` 模式不会读取终端，改为发出 `user.input.required` 事件并以
-`awaiting-user-input` 停止。提交回答后恢复：
+外层 Agent 处理完状态文件中的事项后，在同一个项目目录中使用 `--answer` 恢复：
 
 ```bash
 loopai \
-  --workspace ../CropAI \
   --spec .scratch/cropai-mvp/spec.md \
-  --answer "采用 Coordinator 推荐方案"
+  --answer "已完成外部处理，请重新检查并继续"
 ```
 
-可以重复 `--answer` 为脚本化运行提供多轮回答。不要在回答中输入密码、API key 或凭据。
+`--answer` 是传给 Planner 的自由文本，可重复使用以提供脚本化的多轮结果。没有待恢复的
+handoff 时传入 `--answer` 会报错。不要在回答中输入密码、API key 或凭据。
+
+`LOOPAI_STATUS.md` 是外层 Agent 的快速入口，包含 initiative、当前 ticket、完成进度、Planner
+总结、阻塞原因和下一次恢复命令。详细的持久化上下文仍在 initiative 的 `.loopai/` 目录中。
 
 每个 initiative 的本机状态完全隔离：
 
@@ -69,11 +63,11 @@ initiative/.loopai/
 └── active.lock
 ```
 
-`execution.json` 由 LoopAI 自动创建和更新，保存 ticket 的状态、路径和依赖关系。不同
-workspace 或 initiative 可以并行运行；同一 initiative 的第二个进程会被锁拒绝。
-`.loopai/` 会写入该 workspace 的 `.git/info/exclude`，不会修改团队共享的 `.gitignore`。
+`execution.json` 由 LoopAI 自动创建和更新，保存 ticket 的状态、路径和依赖关系。不同 initiative
+可以并行运行；同一 initiative 的第二个进程会被锁拒绝。`.loopai/` 和 `LOOPAI_STATUS.md` 会写入
+当前目录的 `.git/info/exclude`，不会修改团队共享的 `.gitignore`。
 
-三个角色的默认模型由 workspace 的 `.loopai/config.toml` 管理。Coordinator、Executor 和
+三个角色的默认模型由当前目录的 `.loopai/config.toml` 管理。Coordinator、Executor 和
 Verifier 默认都使用 `gpt-5.6-luna` / `medium`。唯一的模型
 调用路径是本机
 `codex exec --json` 子进程；本项目不使用 OpenAI SDK、不直接请求 Responses API，也不读取
@@ -115,7 +109,7 @@ initiative/
 - 已安装 `flyw:agent-initiative-orchestrator`、`flyw:agent-ticket-executor` 和
   `flyw:agent-ticket-verifier` skills
 - 需要 Grill 模式时已安装 `mattpocock-skills:grilling` skill
-- 目标 workspace 是 Git repository（三个 skills 需要读取真实 repository 状态）
+- 当前启动目录是 Git repository（三个 skills 需要读取真实 repository 状态）
 
 ## 安装与运行
 
@@ -170,7 +164,7 @@ python3 -m venv .venv
 
 ```bash
 export PATH="/path/to/LoopAI/.venv/bin:$PATH"
-cd /path/to/your/workspace
+cd /path/to/your/project
 loopai
 ```
 
@@ -187,27 +181,27 @@ sh scripts/build-macos.sh
 构建产物为 `dist/loopai`。当前 Mac 为 Apple Silicon 时产物是 `arm64`；Intel Mac 需要在
 Intel Mac 上重新构建。
 
-从任意目录运行：
+从项目目录运行：
 
 ```bash
-cd /tmp
-/path/to/LoopAI/dist/loopai --workspace /path/to/your/workspace
+cd /path/to/your/project
+/path/to/LoopAI/dist/loopai
 ```
 
 也可以把构建产物目录加入 `PATH`，直接输入 `loopai`：
 
 ```bash
 export PATH="/path/to/LoopAI/dist:$PATH"
-cd /path/to/your/workspace
+cd /path/to/your/project
 loopai
 ```
 
-单文件版本不包含 Codex CLI、登录状态或 workspace 内容；运行机器仍需安装 Codex CLI 并
+单文件版本不包含 Codex CLI、登录状态或项目内容；运行机器仍需安装 Codex CLI 并
 执行 `codex login`。
 
 ### 选择 spec
 
-当 workspace 下只有一个 `spec.md` 时，可以省略 `--spec`。有多个 spec 时，先查看路径：
+当当前目录下只有一个 `spec.md` 时，可以省略 `--spec`。有多个 spec 时，先查看路径：
 
 ```bash
 rg --files .scratch | rg '/spec\.md$'
@@ -217,18 +211,17 @@ rg --files .scratch | rg '/spec\.md$'
 
 ```bash
 loopai \
-  --workspace /path/to/LoopAI \
   --spec .scratch/recording-dataset-management/spec.md
 ```
 
-相对 `--spec` 路径会以 `--workspace` 为基准解析；也可以直接传入 spec 的绝对路径。
+相对 `--spec` 路径会以当前启动目录为基准解析，并且 spec 必须位于该目录内。
 
 ### 三个 Agent 的模型配置
 
-第一次在 workspace 中启动 `loopai` 时，会自动创建：
+第一次在当前目录启动 `loopai` 时，会自动创建：
 
 ```text
-<workspace>/.loopai/config.toml
+<current-directory>/.loopai/config.toml
 ```
 
 默认内容：
@@ -264,19 +257,18 @@ startup_prompt = """
 ```
 
 `startup_prompt` 会注入每一次 Coordinator prompt，包括有效 session 的恢复调用；Executor 和
-Verifier 不会收到它。你可以把语言、提问方式和本 workspace 的其他要求统一写在这里。
+Verifier 不会收到它。你可以把语言、提问方式和本项目的其他要求统一写在这里。
 
 临时覆盖全部角色：
 
 ```bash
-loopai --workspace . --model gpt-5.6-luna --reasoning-effort medium
+loopai --model gpt-5.6-luna --reasoning-effort medium
 ```
 
 只覆盖某个角色：
 
 ```bash
 loopai \
-  --workspace . \
   --coordinator-model gpt-5.6-luna \
   --coordinator-reasoning-effort max \
   --executor-model gpt-5.6-luna \
@@ -286,20 +278,20 @@ loopai \
 配置优先级：
 
 ```text
-角色 CLI 参数 > 全局 CLI 参数 > workspace TOML > 内置角色默认值
+角色 CLI 参数 > 全局 CLI 参数 > 当前目录 TOML > 内置角色默认值
 ```
 
-当 workspace 内只有一个 `spec.md` 时，无需提供 spec 或 ticket：
+当当前目录内只有一个 `spec.md` 时，无需提供 spec 或 ticket：
 
 ```bash
-loopai --workspace ../CropAI
+cd ../CropAI
+loopai
 ```
 
 有多个 spec 时只选择 initiative，而不是选择 ticket：
 
 ```bash
 loopai \
-  --workspace ../CropAI \
   --spec .scratch/cropai-mvp/spec.md
 ```
 
@@ -307,7 +299,7 @@ loopai \
 JSONL 时，使用 `--json`：
 
 ```bash
-loopai --json --workspace ../CropAI > loopai-events.jsonl
+loopai --json > loopai-events.jsonl
 ```
 
 实际启动的新 Agent 命令等价于：
@@ -318,7 +310,7 @@ codex exec \
   --model gpt-5.6-luna \
   -c 'model_reasoning_effort="medium"' \
   --approve-for-me \
-  --cd ../CropAI \
+  --cd . \
   -
 ```
 
@@ -336,7 +328,7 @@ from loopai import InitiativeOrchestrator, LoopConfig
 
 async def main() -> None:
     config = LoopConfig(
-        workspace=Path("../CropAI"),
+        working_directory=Path("../CropAI"),
         model="gpt-5.6-luna",
         reasoning_effort="medium",
         max_rounds=3,
@@ -360,9 +352,10 @@ asyncio.run(main())
 - `agent.completed`
 - `ticket.completed`
 - `initiative.completed`
+- `initiative.handoff`
 
-只有整个 initiative 的所有 ticket 都完成时 CLI 返回 `0`。等待人工验证、阻塞、失败或达到
-最大轮次时返回 `1`；输入、tracker 或进程错误返回 `2`。
+只有整个 initiative 的所有 ticket 都完成时 CLI 返回 `0`。等待外层 Agent、阻塞、失败或达到
+最大轮次时发出 `initiative.handoff` 并返回 `1`；初始化、tracker 或配置错误返回 `2`。
 
 ## 示例与测试
 

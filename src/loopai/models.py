@@ -16,7 +16,7 @@ class AgentRole(str, Enum):
 
 @dataclass(frozen=True)
 class LoopConfig:
-    workspace: Path
+    working_directory: Path
     model: str | None = None
     reasoning_effort: str | None = None
     coordinator_model: str | None = None
@@ -32,9 +32,9 @@ class LoopConfig:
     max_questions: int = 20
 
     def __post_init__(self) -> None:
-        workspace = self.workspace.expanduser().resolve()
-        if not workspace.is_dir():
-            raise ValueError(f"Workspace does not exist: {workspace}")
+        working_directory = self.working_directory.expanduser().resolve()
+        if not working_directory.is_dir():
+            raise ValueError(f"Working directory does not exist: {working_directory}")
         if self.max_rounds < 1:
             raise ValueError("max_rounds must be at least 1")
         if self.subprocess_stream_limit < 64 * 1024:
@@ -64,7 +64,7 @@ class LoopConfig:
             and not isinstance(self.coordinator_startup_prompt, str)
         ):
             raise ValueError("coordinator startup prompt must be a string")
-        object.__setattr__(self, "workspace", workspace)
+        object.__setattr__(self, "working_directory", working_directory)
 
     def model_for(self, role: AgentRole) -> str:
         specific = {

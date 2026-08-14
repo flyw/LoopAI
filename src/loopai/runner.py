@@ -47,7 +47,7 @@ class CodexRunner:
             *shared,
             "--approve-for-me",
             "--cd",
-            str(self.config.workspace),
+            str(self.config.working_directory),
             "-",
         ]
 
@@ -65,7 +65,7 @@ class CodexRunner:
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
-                cwd=self.config.workspace,
+                cwd=self.config.working_directory,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -82,7 +82,10 @@ class CodexRunner:
 
         process.stdin.write(prompt.encode("utf-8"))
         await process.stdin.drain()
-        process.stdin.close()
+        if process.stdin.can_write_eof():
+            process.stdin.write_eof()
+        else:  # pragma: no cover - supported on the Unix platforms LoopAI targets
+            process.stdin.close()
 
         discovered_session = session_id
         final_text: str | None = None
@@ -125,6 +128,8 @@ class CodexRunner:
 
         try:
             await asyncio.gather(read_stdout(), read_stderr())
+            while process.returncode is None:
+                await asyncio.sleep(0.01)
             exit_code = await process.wait()
         except asyncio.CancelledError:
             if process.returncode is None:

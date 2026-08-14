@@ -4,16 +4,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from loopai.configuration import DEFAULT_CONFIG, load_workspace_config
+from loopai.configuration import DEFAULT_CONFIG, load_working_directory_config
 
 
-class WorkspaceConfigurationTests(unittest.TestCase):
+class WorkingDirectoryConfigurationTests(unittest.TestCase):
     def test_first_load_creates_default_role_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
+            working_directory = Path(directory)
 
-            settings = load_workspace_config(workspace)
-            config = workspace / ".loopai" / "config.toml"
+            settings = load_working_directory_config(working_directory)
+            config = working_directory / ".loopai" / "config.toml"
 
             self.assertEqual(config.read_text(encoding="utf-8"), DEFAULT_CONFIG)
             self.assertEqual(settings["coordinator"].model, "gpt-5.6-luna")
@@ -27,8 +27,8 @@ class WorkspaceConfigurationTests(unittest.TestCase):
 
     def test_existing_configuration_is_loaded_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            config_dir = workspace / ".loopai"
+            working_directory = Path(directory)
+            config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
                 '[executor]\nmodel = "gpt-5.6-luna"',
@@ -37,27 +37,27 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             config = config_dir / "config.toml"
             config.write_text(custom, encoding="utf-8")
 
-            settings = load_workspace_config(workspace)
+            settings = load_working_directory_config(working_directory)
 
             self.assertEqual(settings["executor"].model, "custom-executor")
             self.assertEqual(config.read_text(encoding="utf-8"), custom)
 
     def test_rejects_unknown_section(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            config_dir = workspace / ".loopai"
+            working_directory = Path(directory)
+            config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             (config_dir / "config.toml").write_text(
                 DEFAULT_CONFIG + "\n[other]\nmodel = \"x\"\n", encoding="utf-8"
             )
 
             with self.assertRaisesRegex(ValueError, "Unknown.*sections"):
-                load_workspace_config(workspace)
+                load_working_directory_config(working_directory)
 
     def test_rejects_invalid_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            config_dir = workspace / ".loopai"
+            working_directory = Path(directory)
+            config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             (config_dir / "config.toml").write_text(
                 DEFAULT_CONFIG.replace(
@@ -67,12 +67,12 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "Unsupported reasoning_effort"):
-                load_workspace_config(workspace)
+                load_working_directory_config(working_directory)
 
     def test_loads_multiline_coordinator_startup_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            config_dir = workspace / ".loopai"
+            working_directory = Path(directory)
+            config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
                 'startup_prompt = """请使用中文与用户交互。"""',
@@ -80,7 +80,7 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             )
             (config_dir / "config.toml").write_text(custom, encoding="utf-8")
 
-            settings = load_workspace_config(workspace)
+            settings = load_working_directory_config(working_directory)
 
             self.assertEqual(
                 settings["coordinator"].startup_prompt,
@@ -90,8 +90,8 @@ class WorkspaceConfigurationTests(unittest.TestCase):
 
     def test_rejects_non_string_startup_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            config_dir = workspace / ".loopai"
+            working_directory = Path(directory)
+            config_dir = working_directory / ".loopai"
             config_dir.mkdir()
             custom = DEFAULT_CONFIG.replace(
                 'startup_prompt = """请使用中文与用户交互。"""',
@@ -100,7 +100,7 @@ class WorkspaceConfigurationTests(unittest.TestCase):
             (config_dir / "config.toml").write_text(custom, encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "startup_prompt must be a string"):
-                load_workspace_config(workspace)
+                load_working_directory_config(working_directory)
 
 
 if __name__ == "__main__":

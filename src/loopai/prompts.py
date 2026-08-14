@@ -27,7 +27,7 @@ def coordinator_prompt(
         ""
         if startup_prompt is None or not startup_prompt.strip()
         else (
-            "\nWorkspace Coordinator instructions (apply to every Coordinator turn):\n"
+            "\nWorking-directory Coordinator instructions (apply to every Coordinator turn):\n"
             f"{startup_prompt.strip()}\n"
         )
     )
@@ -50,10 +50,11 @@ Latest observation:
 {observation}
 
 Use repository facts to assess the recommendation. Select `await-user` with a concrete `question`
-when external evidence or authority could unblock progress; this enters a resumable input loop.
-Select `stop` only when another user answer cannot make continuation safe. The Python safety layer
-will reject actions that violate the dependency, role, or completion gates. Put concise evidence in
-`reason` and agent-ready guidance in `feedback`.
+when external evidence or authority could unblock progress. Select `stop` only when another Outer
+Agent intervention is needed before continuation is safe. LoopAI persists a handoff and exits
+instead of waiting for a terminal prompt. The Python safety layer will reject actions that violate
+the dependency, role, or completion gates. Put concise evidence in `reason` and agent-ready guidance
+in `feedback`.
 {additional}
 """
 
@@ -74,19 +75,20 @@ def coordinator_response_prompt(
         ""
         if startup_prompt is None or not startup_prompt.strip()
         else (
-            "\nWorkspace Coordinator instructions (apply to every Coordinator turn):\n"
+            "\nWorking-directory Coordinator instructions (apply to every Coordinator turn):\n"
             f"{startup_prompt.strip()}\n"
         )
     )
     return f"""{skill}
 
-Continue the same Coordinator decision process with the user's answer below. Re-read repository
-state when the answer changes an assumption. In grill mode, recompute the decision-tree frontier,
-ask the next complete round when branches remain, and request explicit confirmation of the final
-plan before returning an execution action.
+Continue the same Coordinator decision process with the Outer Agent's handoff result below. Re-read
+repository state when the result changes an assumption. In grill mode, recompute the decision-tree
+frontier, ask the next complete round when branches remain, and request explicit confirmation of the
+final plan before returning an execution action. If continuation is still unsafe, summarize the
+remaining blocker clearly; LoopAI will hand control back to the Outer Agent.
 {instructions}
 
-User answer:
+Outer Agent handoff result:
 {answer}
 
 Persisted conversation context:

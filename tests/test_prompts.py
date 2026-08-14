@@ -53,7 +53,7 @@ class AgentPromptTests(TestCase):
         self.assertTrue(prompt.startswith("$mattpocock-skills:grilling\n"))
         self.assertIn("Candidate ticket id: 01", prompt)
 
-    def test_coordinator_response_includes_workspace_instructions(self) -> None:
+    def test_coordinator_response_includes_working_directory_instructions(self) -> None:
         prompt = coordinator_response_prompt(
             "yes",
             "{}",

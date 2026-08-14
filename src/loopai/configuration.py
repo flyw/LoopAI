@@ -45,8 +45,8 @@ class RoleSettings:
     startup_prompt: str | None = None
 
 
-def load_workspace_config(workspace: Path) -> dict[str, RoleSettings]:
-    resolved = workspace.expanduser().resolve()
+def load_working_directory_config(working_directory: Path) -> dict[str, RoleSettings]:
+    resolved = working_directory.expanduser().resolve()
     config_directory = resolved / ".loopai"
     config_directory.mkdir(parents=True, exist_ok=True)
     config_path = config_directory / "config.toml"
@@ -125,14 +125,16 @@ def _optional_string(
     return stripped or None
 
 
-def _exclude_loopai_from_git(workspace: Path) -> None:
-    git_dir = workspace / ".git"
+def _exclude_loopai_from_git(working_directory: Path) -> None:
+    git_dir = working_directory / ".git"
     exclude = git_dir / "info" / "exclude"
     if not git_dir.is_dir() or not exclude.parent.is_dir():
         return
     current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-    rule = ".loopai/"
-    if rule in {line.strip() for line in current.splitlines()}:
+    rules = {line.strip() for line in current.splitlines()}
+    required_rules = {".loopai/", "LOOPAI_STATUS.md"}
+    if required_rules <= rules:
         return
     separator = "" if not current or current.endswith("\n") else "\n"
-    exclude.write_text(f"{current}{separator}{rule}\n", encoding="utf-8")
+    additions = "\n".join(rule for rule in sorted(required_rules - rules))
+    exclude.write_text(f"{current}{separator}{additions}\n", encoding="utf-8")

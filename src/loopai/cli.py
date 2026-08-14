@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 
-from .configuration import load_workspace_config
+from .configuration import load_working_directory_config
 from .models import LoopConfig
 from .orchestrator import InitiativeOrchestrator
 
@@ -16,14 +16,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="loopai",
         description=(
             "Complete every ticket in a spec frontier with coordinator, executor, "
-            "and verifier agents."
+            "and verifier agents from the current working directory."
         ),
     )
-    parser.add_argument("--workspace", type=Path, default=Path.cwd())
     parser.add_argument(
         "--spec",
         type=Path,
-        help="Initiative spec.md; auto-discovered when the workspace has exactly one.",
+        help=(
+            "Initiative spec.md relative to the current working directory; "
+            "auto-discovered when there is exactly one."
+        ),
     )
     parser.add_argument("--model", help="Override the model for all three roles.")
     parser.add_argument(
@@ -39,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--answer",
         action="append",
         default=[],
-        help="Answer a pending Coordinator question; repeat for scripted answers.",
+        help="Return an outer-agent result to a pending Planner handoff; repeat if needed.",
     )
     parser.add_argument(
         "--pretty",
@@ -57,42 +59,43 @@ def build_parser() -> argparse.ArgumentParser:
 async def async_main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = config_from_args(args)
-    scripted_answers = iter(args.answer)
+    scripted_answers = list(args.answer)
+    consumed_answers = 0
 
     async def input_provider(request: dict[str, object]) -> str | None:
-        try:
-            return next(scripted_answers)
-        except StopIteration:
-            pass
-        if args.json or not sys.stdin.isatty():
+        del request
+        nonlocal consumed_answers
+        if consumed_answers >= len(scripted_answers):
             return None
-        question = str(request.get("question") or "Coordinator needs your input.")
-        recommended = request.get("recommended_answer")
-        suffix = f"\nRecommended: {recommended}" if recommended else ""
-        return await asyncio.to_thread(
-            _read_multiline_input,
-            f"\n{question}{suffix}\n"
-            "Commands: /status, /back, /cancel\n"
-            "\n> ",
-        )
+        answer = scripted_answers[consumed_answers]
+        consumed_answers += 1
+        return answer
 
-    orchestrator = InitiativeOrchestrator(config, input_provider=input_provider)
+    orchestrator = InitiativeOrchestrator(
+        config,
+        input_provider=input_provider if scripted_answers else None,
+    )
     final_status: str | None = None
     async for event in orchestrator.stream(args.spec):
-        if event.kind == "initiative.completed":
+        if event.kind in {"initiative.completed", "initiative.handoff"}:
             final_status = str(event.payload["status"])
         if args.json:
             print(json.dumps(event.as_dict(), ensure_ascii=False), flush=True)
         else:
             _print_pretty(event.as_dict())
+    if consumed_answers != len(scripted_answers):
+        raise ValueError(
+            "A --answer was supplied without a pending Planner handoff; "
+            "start LoopAI from the initiative's current state and inspect LOOPAI_STATUS.md."
+        )
     return 0 if final_status == "completed" else 1
 
 
 def config_from_args(args: argparse.Namespace) -> LoopConfig:
-    workspace = args.workspace.expanduser().resolve()
-    role_settings = load_workspace_config(workspace)
+    working_directory = Path.cwd().expanduser().resolve()
+    role_settings = load_working_directory_config(working_directory)
     return LoopConfig(
-        workspace=workspace,
+        working_directory=working_directory,
         model=args.model,
         reasoning_effort=args.reasoning_effort,
         coordinator_model=(
@@ -147,33 +150,14 @@ def _print_pretty(event: dict[str, object]) -> None:
     elif kind in {
         "initiative.started",
         "initiative.completed",
+        "initiative.handoff",
         "ticket.started",
         "agent.completed",
         "ticket.completed",
         "agent.stderr",
         "user.input.required",
-        "user.input.status",
     }:
         print(f"{prefix} {kind}: {payload}", flush=True)
-
-
-def _read_multiline_input(prompt: str) -> str | None:
-    """Read one human answer, treating a blank line as the submission boundary."""
-
-    print(prompt, end="", flush=True)
-    lines: list[str] = []
-    while True:
-        try:
-            line = input()
-        except EOFError:
-            return "\n".join(lines) if lines else None
-
-        # Keep the control commands convenient: they take effect after one Enter.
-        if not lines and line.strip().lower() in {"/status", "/back", "/cancel"}:
-            return line
-        if line == "":
-            return "\n".join(lines)
-        lines.append(line)
 
 
 def main() -> None:

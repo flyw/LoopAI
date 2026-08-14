@@ -12,12 +12,12 @@ class InitiativeAlreadyRunningError(RuntimeError):
 
 
 class ConversationStore:
-    def __init__(self, initiative: Path, workspace: Path) -> None:
+    def __init__(self, initiative: Path, working_directory: Path) -> None:
         self.directory = initiative / ".loopai"
         self.conversation_path = self.directory / "conversation.json"
         self.sessions_path = self.directory / "sessions.json"
         self.lock_path = self.directory / "active.lock"
-        self.workspace = workspace
+        self.working_directory = working_directory
         self.state: dict[str, Any] = {
             "version": 1,
             "mode": "normal",
@@ -83,6 +83,43 @@ class ConversationStore:
         self.state["status"] = "awaiting-user-input"
         self._save_state()
         return request
+
+    def mark_handoff(
+        self,
+        *,
+        cause: str,
+        summary: str,
+        question: str | None = None,
+        recommended_answer: str | None = None,
+    ) -> dict[str, Any]:
+        pending = self.pending
+        if pending is None:
+            pending = {
+                "kind": "handoff",
+                "question": question
+                or "LoopAI is paused. The Outer Agent must process the blocker before resuming.",
+                "recommended_answer": recommended_answer,
+            }
+        else:
+            pending = {
+                **pending,
+                "original_kind": pending.get("kind"),
+                "kind": "handoff",
+            }
+        pending = {
+            **pending,
+            "handoff_cause": cause,
+            "planner_summary": summary,
+        }
+        self.state["pending"] = pending
+        self.state["status"] = "handoff"
+        self._save_state()
+        return pending
+
+    def mark_completed(self) -> None:
+        self.state["pending"] = None
+        self.state["status"] = "completed"
+        self._save_state()
 
     def record_answer(self, answer: str) -> dict[str, Any]:
         pending = self.pending
@@ -151,16 +188,18 @@ class ConversationStore:
         return pid if isinstance(pid, int) and pid > 0 else None
 
     def _exclude_from_git(self) -> None:
-        git_dir = self.workspace / ".git"
+        git_dir = self.working_directory / ".git"
         exclude = git_dir / "info" / "exclude"
         if not git_dir.is_dir() or not exclude.parent.is_dir():
             return
         current = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
-        rule = ".loopai/"
-        if rule in {line.strip() for line in current.splitlines()}:
+        rules = {line.strip() for line in current.splitlines()}
+        required_rules = {".loopai/", "LOOPAI_STATUS.md"}
+        if required_rules <= rules:
             return
         separator = "" if not current or current.endswith("\n") else "\n"
-        exclude.write_text(f"{current}{separator}{rule}\n", encoding="utf-8")
+        additions = "\n".join(rule for rule in sorted(required_rules - rules))
+        exclude.write_text(f"{current}{separator}{additions}\n", encoding="utf-8")
 
     @staticmethod
     def _read_json(path: Path, fallback: dict[str, Any]) -> dict[str, Any]:

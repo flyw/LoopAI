@@ -91,6 +91,38 @@ class FakeRunner:
         return result
 
 
+class FailingExecutorRunner(FakeRunner):
+    async def run(
+        self,
+        *,
+        role: AgentRole,
+        ticket: Path,
+        round_number: int,
+        prompt: str,
+        session_id: str | None,
+        emit: Callable[[StreamEvent], Awaitable[None]],
+    ) -> AgentResult:
+        if role is AgentRole.EXECUTOR:
+            self.calls.append(
+                {
+                    "role": role,
+                    "ticket": ticket,
+                    "round": round_number,
+                    "prompt": prompt,
+                    "session_id": session_id,
+                }
+            )
+            raise AgentProcessError("executor unavailable")
+        return await super().run(
+            role=role,
+            ticket=ticket,
+            round_number=round_number,
+            prompt=prompt,
+            session_id=session_id,
+            emit=emit,
+        )
+
+
 def result(role: AgentRole, status: str, summary: str, session: str) -> AgentResult:
     return AgentResult(
         role=role,
@@ -126,16 +158,16 @@ def create_initiative(root: Path, statuses: tuple[str, str] = ("ready-for-agent"
 
 class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def collect(
-        self, workspace: Path, runner: FakeRunner, spec: Path | None = None, max_rounds: int = 3
+        self, working_directory: Path, runner: FakeRunner, spec: Path | None = None, max_rounds: int = 3
     ) -> list[StreamEvent]:
-        config = LoopConfig(workspace=workspace, max_rounds=max_rounds)
+        config = LoopConfig(working_directory=working_directory, max_rounds=max_rounds)
         orchestrator = InitiativeOrchestrator(config, runner=runner)  # type: ignore[arg-type]
         return [event async for event in orchestrator.stream(spec)]
 
     async def test_discovers_spec_and_completes_all_tickets_in_dependency_order(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
+            working_directory = Path(directory)
+            create_initiative(working_directory)
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "one", "exec-1"),
@@ -145,7 +177,10 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
+            status = (working_directory / "LOOPAI_STATUS.md").read_text(
+                encoding="utf-8"
+            )
 
         executor_tickets = [
             Path(call["ticket"]).name
@@ -157,11 +192,13 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].kind, "initiative.completed")
         self.assertEqual(events[-1].payload["status"], "completed")
         self.assertEqual(events[-1].payload["total"], 2)
+        self.assertIn("Status: `completed`", status)
+        self.assertIn("The initiative completed successfully.", status)
 
     async def test_skips_completed_ticket_and_starts_new_frontier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace, ("completed", "ready-for-agent"))
+            working_directory = Path(directory)
+            create_initiative(working_directory, ("completed", "ready-for-agent"))
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "two", "exec-2"),
@@ -169,7 +206,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
         self.assertEqual(
             Path(calls_for(runner, AgentRole.EXECUTOR)[0]["ticket"]).name,
@@ -179,8 +216,8 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ready_for_verification_resumes_with_verifier_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace, ("ready-for-verification", "blocked"))
+            working_directory = Path(directory)
+            create_initiative(working_directory, ("ready-for-verification", "blocked"))
             runner = FakeRunner(
                 [
                     result(AgentRole.VERIFIER, "completed", "one ok", "verify-1"),
@@ -188,19 +225,20 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
         worker_calls = [
             call for call in runner.calls if call["role"] is not AgentRole.COORDINATOR
         ]
         self.assertEqual(worker_calls[0]["role"], AgentRole.VERIFIER)
         self.assertEqual(worker_calls[1]["role"], AgentRole.EXECUTOR)
-        self.assertEqual(events[-1].payload["stopped_at_ticket"], "02")
+        self.assertEqual(events[-1].payload["current_ticket_id"], "02")
+        self.assertEqual(events[-1].payload["status"], "handoff")
 
     async def test_failed_verification_reacts_with_feedback_and_reuses_two_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "patch", "exec-1"),
@@ -211,7 +249,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            await self.collect(workspace, runner, spec)
+            await self.collect(working_directory, runner, spec)
 
         executor_calls = calls_for(runner, AgentRole.EXECUTOR)
         verifier_calls = calls_for(runner, AgentRole.VERIFIER)
@@ -221,8 +259,8 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_incomplete_executor_retries_same_session_before_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
+            working_directory = Path(directory)
+            create_initiative(working_directory)
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "incomplete", "ruff not run", "exec-1"),
@@ -237,7 +275,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
         worker_calls = [
             call for call in runner.calls if call["role"] is not AgentRole.COORDINATOR
@@ -248,28 +286,48 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(worker_calls[1]["session_id"], "exec-1")
         self.assertIn("ruff not run", str(worker_calls[1]["prompt"]))
-        self.assertEqual(events[-1].payload["stopped_at_ticket"], "02")
+        self.assertEqual(events[-1].payload["current_ticket_id"], "02")
+        self.assertEqual(events[-1].payload["status"], "handoff")
 
     async def test_ticket_failure_stops_before_downstream_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
+            working_directory = Path(directory)
+            create_initiative(working_directory)
             runner = FakeRunner(
                 [result(AgentRole.EXECUTOR, "blocked", "dependency missing", "exec-1")]
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
         self.assertEqual(len(calls_for(runner, AgentRole.EXECUTOR)), 1)
         self.assertEqual(len(calls_for(runner, AgentRole.VERIFIER)), 0)
-        self.assertEqual(events[-1].kind, "initiative.completed")
-        self.assertEqual(events[-1].payload["status"], "blocked")
-        self.assertEqual(events[-1].payload["stopped_at_ticket"], "01")
+        self.assertEqual(events[-1].kind, "initiative.handoff")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "blocked")
+        self.assertEqual(events[-1].payload["current_ticket_id"], "01")
+
+    async def test_agent_process_error_is_summarized_and_handed_off(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            create_initiative(working_directory)
+            runner = FailingExecutorRunner([], coordinator_actions=["start-executor", "stop"])
+
+            events = await self.collect(working_directory, runner)
+            status = (working_directory / "LOOPAI_STATUS.md").read_text(
+                encoding="utf-8"
+            )
+
+        self.assertEqual(events[-1].kind, "initiative.handoff")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "blocked")
+        coordinator_calls = calls_for(runner, AgentRole.COORDINATOR)
+        self.assertIn("Executor agent failed", str(coordinator_calls[-1]["prompt"]))
+        self.assertIn("loopai --answer", status)
 
     async def test_verifier_completion_is_persisted_by_loopai(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace, ("ready-for-agent", "completed"))
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory, ("ready-for-agent", "completed"))
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "one", "exec-1"),
@@ -277,7 +335,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
             tracker = spec.parent / ".loopai" / "execution.json"
             payload = json.loads(tracker.read_text(encoding="utf-8"))
@@ -286,9 +344,9 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_awaiting_ticket_stops_before_independent_ready_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
+            working_directory = Path(directory)
             spec = create_initiative(
-                workspace, ("awaiting-user-verification", "ready-for-agent")
+                working_directory, ("awaiting-user-verification", "ready-for-agent")
             )
             second_ticket = spec.parent / "issues" / "02-second.md"
             second_ticket.write_text(
@@ -299,17 +357,18 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             )
             runner = FakeRunner([])
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
         self.assertEqual(calls_for(runner, AgentRole.EXECUTOR), [])
         self.assertEqual(calls_for(runner, AgentRole.VERIFIER), [])
-        self.assertEqual(events[-1].payload["status"], "awaiting-user-input")
-        self.assertEqual(events[-1].payload["stopped_at_ticket"], "01")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "awaiting-user-input")
+        self.assertEqual(events[-1].payload["current_ticket_id"], "01")
 
     async def test_reuses_one_coordinator_session_for_all_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
+            working_directory = Path(directory)
+            create_initiative(working_directory)
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "one", "exec-1"),
@@ -318,7 +377,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            await self.collect(workspace, runner)
+            await self.collect(working_directory, runner)
 
         coordinator_calls = calls_for(runner, AgentRole.COORDINATOR)
         self.assertGreaterEqual(len(coordinator_calls), 3)
@@ -329,8 +388,8 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_startup_prompt_is_injected_on_every_coordinator_turn(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
+            working_directory = Path(directory)
+            create_initiative(working_directory)
             runner = FakeRunner(
                 [
                     result(AgentRole.EXECUTOR, "ready-for-verification", "one", "exec-1"),
@@ -339,7 +398,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
             config = LoopConfig(
-                workspace=workspace,
+                working_directory=working_directory,
                 coordinator_startup_prompt="请使用中文与用户交互。",
             )
             orchestrator = InitiativeOrchestrator(config, runner=runner)  # type: ignore[arg-type]
@@ -364,37 +423,49 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejects_unsafe_coordinator_transition(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
+            working_directory = Path(directory)
+            create_initiative(working_directory)
             runner = FakeRunner(
                 [], coordinator_actions=["complete-initiative"]
             )
 
-            events = await self.collect(workspace, runner)
+            events = await self.collect(working_directory, runner)
 
         self.assertEqual(calls_for(runner, AgentRole.EXECUTOR), [])
-        self.assertEqual(events[-1].payload["status"], "blocked")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "blocked")
         self.assertIn("Rejected unsafe coordinator action", events[-1].payload["summary"])
 
     async def test_noninteractive_question_persists_and_stops_for_input(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             runner = FakeRunner([], coordinator_actions=["ask-user"])
 
-            events = await self.collect(workspace, runner, spec)
+            events = await self.collect(working_directory, runner, spec)
             state = (spec.parent / ".loopai" / "conversation.json").read_text(
                 encoding="utf-8"
             )
+            conversation = json.loads(state)
+            handoff = (working_directory / "LOOPAI_STATUS.md").read_text(
+                encoding="utf-8"
+            )
 
-        self.assertEqual(events[-1].payload["status"], "awaiting-user-input")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "awaiting-user-input")
         self.assertTrue(any(event.kind == "user.input.required" for event in events))
         self.assertIn("Which direction should LoopAI take?", state)
+        self.assertEqual(conversation["pending"]["kind"], "handoff")
+        self.assertEqual(conversation["pending"]["original_kind"], "ask-user")
+        self.assertIn("Status: `handoff`", handoff)
+        self.assertIn("Cause: `awaiting-user-input`", handoff)
+        self.assertIn("Coordinator chose ask-user.", handoff)
+        self.assertIn("loopai --answer", handoff)
 
     async def test_input_provider_runs_after_required_event_is_delivered(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             runner = FakeRunner([], coordinator_actions=["ask-user"])
             delivered: list[str] = []
 
@@ -405,7 +476,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             orchestrator = InitiativeOrchestrator(
-                LoopConfig(workspace=workspace),
+                LoopConfig(working_directory=working_directory),
                 runner=runner,  # type: ignore[arg-type]
                 input_provider=provide_input,
             )
@@ -414,27 +485,28 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_noninteractive_await_user_without_question_persists_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             runner = FakeRunner(
                 [],
                 coordinator_actions=["await-user"],
                 coordinator_question=None,
             )
 
-            events = await self.collect(workspace, runner, spec)
+            events = await self.collect(working_directory, runner, spec)
             state = (spec.parent / ".loopai" / "conversation.json").read_text(
                 encoding="utf-8"
             )
 
-        self.assertEqual(events[-1].payload["status"], "awaiting-user-input")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "awaiting-user-input")
         self.assertIn("Coordinator chose await-user", state)
         self.assertIn("How should LoopAI proceed?", state)
 
     async def test_interactive_await_user_resumes_same_coordinator(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             answers = iter(["Authorize the ticket-scoped test files."])
 
             async def provide_input(request: dict[str, object]) -> str | None:
@@ -447,7 +519,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 coordinator_question=None,
             )
             orchestrator = InitiativeOrchestrator(
-                LoopConfig(workspace=workspace),
+                LoopConfig(working_directory=working_directory),
                 runner=runner,  # type: ignore[arg-type]
                 input_provider=provide_input,
             )
@@ -458,14 +530,15 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coordinator_calls[1]["session_id"], "coord-1")
         self.assertIn("Authorize the ticket-scoped", coordinator_calls[1]["prompt"])
         self.assertEqual(len(calls_for(runner, AgentRole.EXECUTOR)), 1)
-        self.assertEqual(events[-1].payload["status"], "blocked")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "blocked")
 
     async def test_answer_resumes_same_coordinator_before_worker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             first_runner = FakeRunner([], coordinator_actions=["ask-user"])
-            await self.collect(workspace, first_runner, spec)
+            await self.collect(working_directory, first_runner, spec)
 
             answers = iter(["Use the recommended direction."])
 
@@ -476,7 +549,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             runner = FakeRunner(
                 [result(AgentRole.EXECUTOR, "blocked", "stop", "exec-1")]
             )
-            config = LoopConfig(workspace=workspace)
+            config = LoopConfig(working_directory=working_directory)
             orchestrator = InitiativeOrchestrator(
                 config, runner=runner, input_provider=provide_input  # type: ignore[arg-type]
             )
@@ -486,12 +559,13 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(coordinator_calls[0]["session_id"], "coord-1")
         self.assertIn("Use the recommended direction", coordinator_calls[0]["prompt"])
         self.assertEqual(len(calls_for(runner, AgentRole.EXECUTOR)), 1)
-        self.assertEqual(events[-1].payload["status"], "blocked")
+        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].payload["cause"], "blocked")
 
     async def test_grill_mode_uses_grilling_skill_and_requires_final_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             answers = iter(["yes", "Choose option A", "yes"])
 
             async def provide_input(request: dict[str, object]) -> str | None:
@@ -504,7 +578,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             )
             orchestrator = InitiativeOrchestrator(
                 LoopConfig(
-                    workspace=workspace,
+                    working_directory=working_directory,
                     coordinator_startup_prompt="请使用中文与用户交互。",
                 ),
                 runner=runner,  # type: ignore[arg-type]
@@ -524,10 +598,10 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_coordinator_session_is_replaced_with_persisted_context(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             first_runner = FakeRunner([], coordinator_actions=["ask-user"])
-            await self.collect(workspace, first_runner, spec)
+            await self.collect(working_directory, first_runner, spec)
 
             async def provide_input(request: dict[str, object]) -> str | None:
                 del request
@@ -539,7 +613,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             )
             orchestrator = InitiativeOrchestrator(
                 LoopConfig(
-                    workspace=workspace,
+                    working_directory=working_directory,
                     coordinator_startup_prompt="请使用中文与用户交互。",
                 ),
                 runner=runner,  # type: ignore[arg-type]

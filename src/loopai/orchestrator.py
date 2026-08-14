@@ -15,6 +15,7 @@ from .prompts import (
     verifier_prompt,
 )
 from .runner import AgentProcessError, CodexRunner
+from .status import StatusFile
 
 _DONE = object()
 InputProvider = Callable[[dict[str, Any]], Awaitable[Optional[str]]]
@@ -77,10 +78,13 @@ class InitiativeOrchestrator:
         spec: Path | None,
         emit: Callable[[StreamEvent], Awaitable[None]],
     ) -> None:
-        frontier = Frontier.discover(self.config.workspace, spec)
-        conversation = ConversationStore(frontier.spec.parent, self.config.workspace)
+        frontier = Frontier.discover(self.config.working_directory, spec)
+        conversation = ConversationStore(
+            frontier.spec.parent, self.config.working_directory
+        )
         conversation.open()
         self._conversation = conversation
+        status_file = StatusFile(self.config.working_directory)
         coordinator_session = conversation.coordinator_session_id
         coordinator_turn = 0
         latest_observation = "No agent has run in this process. Inspect durable repository state."
@@ -96,48 +100,37 @@ class InitiativeOrchestrator:
             conversation.set_ticket(record.ticket_id if record is not None else None)
             subject = record.path if record is not None else frontier.spec
             prompt = coordinator_prompt(
-                    spec=frontier.spec,
-                    execution_map=frontier.execution_map,
-                    ticket=record.path if record is not None else None,
-                    ticket_id=record.ticket_id if record is not None else None,
-                    tracker_status=record.status if record is not None else None,
-                    recommended_action=recommendation,
-                    observation=(
-                        f"{observation}\nPersisted conversation state: "
-                        f"{conversation.context()}"
-                    ),
-                    executor_session_id=executor_session_id,
-                    verifier_session_id=verifier_session_id,
-                    startup_prompt=self.config.coordinator_startup_prompt,
-                )
+                spec=frontier.spec,
+                execution_map=frontier.execution_map,
+                ticket=record.path if record is not None else None,
+                ticket_id=record.ticket_id if record is not None else None,
+                tracker_status=record.status if record is not None else None,
+                recommended_action=recommendation,
+                observation=(
+                    f"{observation}\nPersisted conversation state: "
+                    f"{conversation.context()}"
+                ),
+                executor_session_id=executor_session_id,
+                verifier_session_id=verifier_session_id,
+                startup_prompt=self.config.coordinator_startup_prompt,
+            )
 
             pending = conversation.pending
             if pending is not None:
                 answer = await self._request_input(emit, subject, pending)
                 if answer is None:
-                    return "awaiting-user-input", "User input is required to continue.", None
-                command = answer.strip().lower()
-                while command == "/status":
-                    await emit(
-                        StreamEvent(
-                            kind="user.input.status",
-                            ticket=subject,
-                            role=AgentRole.COORDINATOR,
-                            payload={"conversation": conversation.state},
-                        )
+                    previous_summary = pending.get("planner_summary")
+                    return (
+                        "awaiting-user-input",
+                        previous_summary.strip()
+                        if isinstance(previous_summary, str) and previous_summary.strip()
+                        else "The Planner is waiting for the Outer Agent's handoff response.",
+                        None,
                     )
-                    answer = await self._request_input(emit, subject, pending)
-                    if answer is None:
-                        return "awaiting-user-input", "User input is required to continue.", None
-                    command = answer.strip().lower()
-                if command == "/cancel":
-                    return "stop", "The user cancelled the initiative.", None
-                if command == "/back":
-                    removed = conversation.pop_answer()
-                    answer = f"User requested revisiting the previous answer: {removed}"
-                if pending.get("kind") == "grill-confirmation" and _is_affirmative(answer):
+                pending_kind = pending.get("original_kind", pending.get("kind"))
+                if pending_kind == "grill-confirmation" and _is_affirmative(answer):
                     conversation.set_mode("normal")
-                if pending.get("kind") == "enter-grill" and not _is_affirmative(answer):
+                if pending_kind == "enter-grill" and not _is_affirmative(answer):
                     conversation.set_mode("normal")
                     answer = (
                         "The user declined grill mode. Continue autonomously or ask one "
@@ -166,9 +159,13 @@ class InitiativeOrchestrator:
                         session_id=coordinator_session,
                         emit=emit,
                     )
-                except AgentProcessError:
+                except AgentProcessError as error:
                     if coordinator_session is None:
-                        raise
+                        return (
+                            "stop",
+                            f"Coordinator agent failed before producing a decision: {error}",
+                            None,
+                        )
                     stale_session = coordinator_session
                     coordinator_session = None
                     conversation.set_session(None)
@@ -196,14 +193,22 @@ class InitiativeOrchestrator:
                         verifier_session_id=verifier_session_id,
                         startup_prompt=self.config.coordinator_startup_prompt,
                     )
-                    decision = await self.runner.run(
-                        role=AgentRole.COORDINATOR,
-                        ticket=subject,
-                        round_number=coordinator_turn,
-                        prompt=recovery_prompt,
-                        session_id=None,
-                        emit=emit,
-                    )
+                    try:
+                        decision = await self.runner.run(
+                            role=AgentRole.COORDINATOR,
+                            ticket=subject,
+                            round_number=coordinator_turn,
+                            prompt=recovery_prompt,
+                            session_id=None,
+                            emit=emit,
+                        )
+                    except AgentProcessError as recovery_error:
+                        return (
+                            "stop",
+                            "Coordinator agent failed during session recovery: "
+                            f"{recovery_error}",
+                            None,
+                        )
                 coordinator_session = decision.session_id
                 conversation.set_session(coordinator_session)
                 await emit(
@@ -229,9 +234,7 @@ class InitiativeOrchestrator:
                     )
                     answer = await self._request_input(emit, subject, request)
                     if answer is None:
-                        return "awaiting-user-input", "Final grill confirmation is required.", None
-                    if answer.strip().lower() == "/cancel":
-                        return "stop", "The user cancelled the initiative.", None
+                        return "awaiting-user-input", decision.summary, None
                     conversation.record_answer(answer)
                     if _is_affirmative(answer):
                         conversation.set_mode("normal")
@@ -268,26 +271,11 @@ class InitiativeOrchestrator:
                 )
                 answer = await self._request_input(emit, subject, request)
                 if answer is None:
-                    return "awaiting-user-input", "User input is required to continue.", None
-                command = answer.strip().lower()
-                while command == "/status":
-                    await emit(
-                        StreamEvent(
-                            kind="user.input.status",
-                            ticket=subject,
-                            role=AgentRole.COORDINATOR,
-                            payload={"conversation": conversation.state},
-                        )
+                    return (
+                        "awaiting-user-input",
+                        decision.summary,
+                        None,
                     )
-                    answer = await self._request_input(emit, subject, request)
-                    if answer is None:
-                        return "awaiting-user-input", "User input is required to continue.", None
-                    command = answer.strip().lower()
-                if command == "/cancel":
-                    return "stop", "The user cancelled the initiative.", None
-                if command == "/back":
-                    removed = conversation.pop_answer()
-                    answer = f"User requested revisiting the previous answer: {removed}"
                 if decision.status == "enter-grill" and not _is_affirmative(answer):
                     conversation.set_mode("normal")
                     answer = (
@@ -359,6 +347,95 @@ class InitiativeOrchestrator:
             )
         )
 
+        async def publish_handoff(
+            *,
+            cause: str,
+            summary: str,
+            current_ticket_id: str | None = None,
+            waiting_ticket_ids: list[str] | None = None,
+            error: str | None = None,
+        ) -> None:
+            current_frontier = Frontier.load(frontier.spec, frontier.execution_map)
+            selected_ticket_id = current_ticket_id or conversation.state.get(
+                "current_ticket_id"
+            )
+            selected_ticket = next(
+                (
+                    item
+                    for item in current_frontier.tickets
+                    if item.ticket_id == selected_ticket_id
+                ),
+                None,
+            )
+            pending = conversation.mark_handoff(cause=cause, summary=summary)
+            status_file.write(
+                status="handoff",
+                cause=cause,
+                spec=current_frontier.spec,
+                execution_map=current_frontier.execution_map,
+                completed=len(current_frontier.completed_ids),
+                total=len(current_frontier.tickets),
+                current_ticket_id=(
+                    selected_ticket.ticket_id if selected_ticket is not None else None
+                ),
+                current_ticket_path=(
+                    selected_ticket.path if selected_ticket is not None else None
+                ),
+                summary=summary,
+                pending=pending,
+                waiting_ticket_ids=waiting_ticket_ids,
+                error=error,
+            )
+            await emit(
+                StreamEvent(
+                    kind="initiative.handoff",
+                    ticket=selected_ticket.path if selected_ticket is not None else None,
+                    role=AgentRole.COORDINATOR,
+                    payload={
+                        "status": "handoff",
+                        "cause": cause,
+                        "completed": len(current_frontier.completed_ids),
+                        "total": len(current_frontier.tickets),
+                        "current_ticket_id": (
+                            selected_ticket.ticket_id
+                            if selected_ticket is not None
+                            else None
+                        ),
+                        "summary": summary,
+                        "pending": pending,
+                        "status_file": str(status_file.path),
+                    },
+                )
+            )
+
+        async def publish_completed(summary: str) -> None:
+            current_frontier = Frontier.load(frontier.spec, frontier.execution_map)
+            conversation.mark_completed()
+            status_file.write(
+                status="completed",
+                cause=None,
+                spec=current_frontier.spec,
+                execution_map=current_frontier.execution_map,
+                completed=len(current_frontier.completed_ids),
+                total=len(current_frontier.tickets),
+                current_ticket_id=None,
+                current_ticket_path=None,
+                summary=summary,
+                pending=None,
+            )
+            await emit(
+                StreamEvent(
+                    kind="initiative.completed",
+                    payload={
+                        "status": "completed",
+                        "completed": len(current_frontier.completed_ids),
+                        "total": len(current_frontier.tickets),
+                        "summary": summary,
+                        "status_file": str(status_file.path),
+                    },
+                )
+            )
+
         while True:
             frontier = Frontier.load(frontier.spec, frontier.execution_map)
             effective_completed = frontier.completed_ids
@@ -366,21 +443,13 @@ class InitiativeOrchestrator:
                 action, reason, _ = await coordinate(
                     "complete-initiative", None, latest_observation
                 )
-                await emit(
-                    StreamEvent(
-                        kind="initiative.completed",
-                        payload={
-                            "status": (
-                                "completed"
-                                if action == "complete-initiative"
-                                else self._status_for_action(action)
-                            ),
-                            "completed": len(effective_completed),
-                            "total": len(frontier.tickets),
-                            "summary": reason,
-                        },
+                if action == "complete-initiative":
+                    await publish_completed(reason)
+                else:
+                    await publish_handoff(
+                        cause=self._status_for_action(action),
+                        summary=reason,
                     )
-                )
                 return
 
             ticket = frontier.next_ticket()
@@ -391,23 +460,14 @@ class InitiativeOrchestrator:
                     if item.ticket_id not in effective_completed
                     and item.status == "awaiting-user-verification"
                 ]
-                status = "awaiting-user-verification" if waiting else "blocked"
                 recommendation = "await-user" if waiting else "stop"
                 action, reason, _ = await coordinate(
                     recommendation, None, latest_observation
                 )
-                status = self._status_for_action(action)
-                await emit(
-                    StreamEvent(
-                        kind="initiative.completed",
-                        payload={
-                            "status": status,
-                            "completed": len(effective_completed),
-                            "total": len(frontier.tickets),
-                            "waiting_ticket_ids": waiting,
-                            "summary": reason,
-                        },
-                    )
+                await publish_handoff(
+                    cause=self._status_for_action(action),
+                    summary=reason,
+                    waiting_ticket_ids=waiting,
                 )
                 return
 
@@ -415,17 +475,10 @@ class InitiativeOrchestrator:
                 action, reason, _ = await coordinate(
                     "await-user", ticket, latest_observation
                 )
-                await emit(
-                    StreamEvent(
-                        kind="initiative.completed",
-                        payload={
-                            "status": self._status_for_action(action),
-                            "completed": len(effective_completed),
-                            "total": len(frontier.tickets),
-                            "stopped_at_ticket": ticket.ticket_id,
-                            "summary": reason,
-                        },
-                    )
+                await publish_handoff(
+                    cause=self._status_for_action(action),
+                    summary=reason,
+                    current_ticket_id=ticket.ticket_id,
                 )
                 return
 
@@ -438,18 +491,10 @@ class InitiativeOrchestrator:
                 first_action, ticket, latest_observation
             )
             if action != first_action:
-                status = self._status_for_action(action)
-                await emit(
-                    StreamEvent(
-                        kind="initiative.completed",
-                        payload={
-                            "status": status,
-                            "completed": len(effective_completed),
-                            "total": len(frontier.tickets),
-                            "stopped_at_ticket": ticket.ticket_id,
-                            "summary": reason,
-                        },
-                    )
+                await publish_handoff(
+                    cause=self._status_for_action(action),
+                    summary=reason,
+                    current_ticket_id=ticket.ticket_id,
                 )
                 return
 
@@ -458,17 +503,10 @@ class InitiativeOrchestrator:
                 f"Ticket {ticket.ticket_id} ended with status {result.status}: {result.summary}"
             )
             if result.status != "completed":
-                await emit(
-                    StreamEvent(
-                        kind="initiative.completed",
-                        payload={
-                            "status": result.status,
-                            "completed": len(effective_completed),
-                            "total": len(frontier.tickets),
-                            "stopped_at_ticket": ticket.ticket_id,
-                            "summary": result.summary,
-                        },
-                    )
+                await publish_handoff(
+                    cause=result.status,
+                    summary=result.summary,
+                    current_ticket_id=ticket.ticket_id,
                 )
                 return
             refreshed = Frontier.load(frontier.spec, frontier.execution_map)
@@ -476,20 +514,13 @@ class InitiativeOrchestrator:
                 item for item in refreshed.tickets if item.ticket_id == ticket.ticket_id
             )
             if persisted.status != "completed":
-                await emit(
-                    StreamEvent(
-                        kind="initiative.completed",
-                        payload={
-                            "status": "blocked",
-                            "completed": len(refreshed.completed_ids),
-                            "total": len(refreshed.tickets),
-                            "stopped_at_ticket": ticket.ticket_id,
-                            "summary": (
-                                "Verifier returned completed but the durable tracker did not "
-                                "persist the ticket as completed."
-                            ),
-                        },
-                    )
+                await publish_handoff(
+                    cause="tracker-persistence-error",
+                    summary=(
+                        "Verifier returned completed but the durable tracker did not "
+                        "persist the ticket as completed."
+                    ),
+                    current_ticket_id=ticket.ticket_id,
                 )
                 return
 
@@ -518,14 +549,32 @@ class InitiativeOrchestrator:
         )
         for round_number in range(1, self.config.max_rounds + 1):
             if not (round_number == 1 and record.status == "ready-for-verification"):
-                executor = await self.runner.run(
-                    role=AgentRole.EXECUTOR,
-                    ticket=ticket,
-                    round_number=round_number,
-                    prompt=executor_prompt(ticket, round_number, previous_feedback),
-                    session_id=executor_session,
-                    emit=emit,
-                )
+                try:
+                    executor = await self.runner.run(
+                        role=AgentRole.EXECUTOR,
+                        ticket=ticket,
+                        round_number=round_number,
+                        prompt=executor_prompt(ticket, round_number, previous_feedback),
+                        session_id=executor_session,
+                        emit=emit,
+                    )
+                except AgentProcessError as error:
+                    next_action, decision_reason, _ = await coordinate(
+                        "stop",
+                        record,
+                        f"Executor agent failed before completing its turn: {error}",
+                        executor_session,
+                        verifier_session,
+                    )
+                    return await self._decision_stop(
+                        emit,
+                        ticket,
+                        round_number,
+                        executor_session,
+                        verifier_session,
+                        next_action,
+                        decision_reason,
+                    )
                 executor_session = executor.session_id
                 _persist_worker_status(frontier, record.ticket_id, executor.status)
                 await emit(
@@ -604,14 +653,32 @@ class InitiativeOrchestrator:
                     next_action, decision_reason,
                 )
 
-            verifier = await self.runner.run(
-                role=AgentRole.VERIFIER,
-                ticket=ticket,
-                round_number=round_number,
-                prompt=verifier_prompt(ticket, round_number, executor_summary),
-                session_id=verifier_session,
-                emit=emit,
-            )
+            try:
+                verifier = await self.runner.run(
+                    role=AgentRole.VERIFIER,
+                    ticket=ticket,
+                    round_number=round_number,
+                    prompt=verifier_prompt(ticket, round_number, executor_summary),
+                    session_id=verifier_session,
+                    emit=emit,
+                )
+            except AgentProcessError as error:
+                next_action, decision_reason, _ = await coordinate(
+                    "stop",
+                    record,
+                    f"Verifier agent failed before completing its turn: {error}",
+                    executor_session,
+                    verifier_session,
+                )
+                return await self._decision_stop(
+                    emit,
+                    ticket,
+                    round_number,
+                    executor_session,
+                    verifier_session,
+                    next_action,
+                    decision_reason,
+                )
             verifier_session = verifier.session_id
             _persist_worker_status(frontier, record.ticket_id, verifier.status)
             await emit(
@@ -711,7 +778,6 @@ class InitiativeOrchestrator:
     ) -> str | None:
         payload = {
             **request,
-            "commands": ["/cancel", "/back", "/status"],
             "warning": "Do not enter passwords, API keys, or other secrets.",
         }
         await emit(

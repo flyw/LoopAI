@@ -2,6 +2,7 @@ import os
 import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest.mock import patch
 
 from loopai.models import AgentRole, LoopConfig, StreamEvent
 from loopai.runner import AgentProcessError, CodexRunner, _agent_message_text
@@ -10,10 +11,10 @@ from loopai.cli import build_parser, config_from_args
 
 class CodexRunnerTests(TestCase):
     def setUp(self) -> None:
-        self.workspace = Path.cwd()
-        self.runner = CodexRunner(LoopConfig(workspace=self.workspace))
+        self.working_directory = Path.cwd()
+        self.runner = CodexRunner(LoopConfig(working_directory=self.working_directory))
 
-    def test_new_session_command_sets_model_effort_workspace_and_automatic_approval(self) -> None:
+    def test_new_session_command_sets_model_effort_working_directory_and_automatic_approval(self) -> None:
         command = self.runner.build_command(AgentRole.EXECUTOR)
 
         self.assertEqual(command[:2], ["codex", "exec"])
@@ -21,7 +22,7 @@ class CodexRunnerTests(TestCase):
         self.assertIn('model_reasoning_effort="medium"', command)
         self.assertIn("--approve-for-me", command)
         self.assertNotIn("--sandbox", command)
-        self.assertIn(str(self.workspace.resolve()), command)
+        self.assertIn(str(self.working_directory.resolve()), command)
         self.assertEqual(command[-1], "-")
 
     def test_resume_command_reuses_exact_agent_session(self) -> None:
@@ -53,7 +54,7 @@ class CodexRunnerTests(TestCase):
     def test_role_setting_overrides_global_setting(self) -> None:
         runner = CodexRunner(
             LoopConfig(
-                workspace=self.workspace,
+                working_directory=self.working_directory,
                 model="global-model",
                 reasoning_effort="low",
                 coordinator_model="coordinator-model",
@@ -88,12 +89,10 @@ class CodexRunnerTests(TestCase):
         self.assertTrue(json_output.json)
         self.assertEqual(build_parser().parse_args(["--answer", "yes"]).answer, ["yes"])
 
-    def test_cli_role_override_beats_global_and_workspace_toml(self) -> None:
+    def test_cli_role_override_beats_global_and_working_directory_toml(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             args = build_parser().parse_args(
                 [
-                    "--workspace",
-                    directory,
                     "--model",
                     "global-model",
                     "--coordinator-model",
@@ -101,7 +100,8 @@ class CodexRunnerTests(TestCase):
                 ]
             )
 
-            config = config_from_args(args)
+            with patch("loopai.cli.Path.cwd", return_value=Path(directory)):
+                config = config_from_args(args)
 
             self.assertEqual(config.model_for(AgentRole.COORDINATOR), "role-model")
             self.assertEqual(config.model_for(AgentRole.EXECUTOR), "global-model")
@@ -111,7 +111,7 @@ class CodexRunnerTests(TestCase):
 class CodexRunnerProcessTests(IsolatedAsyncioTestCase):
     async def test_missing_codex_cli_has_an_actionable_error(self) -> None:
         runner = CodexRunner(
-            LoopConfig(workspace=Path.cwd(), codex_binary="missing-codex-for-test")
+            LoopConfig(working_directory=Path.cwd(), codex_binary="missing-codex-for-test")
         )
 
         async def emit(event: StreamEvent) -> None:
@@ -151,7 +151,7 @@ print(json.dumps({
             )
             os.chmod(fake_codex, 0o755)
             runner = CodexRunner(
-                LoopConfig(workspace=Path.cwd(), codex_binary=str(fake_codex))
+                LoopConfig(working_directory=Path.cwd(), codex_binary=str(fake_codex))
             )
             events: list[StreamEvent] = []
 

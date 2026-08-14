@@ -38,8 +38,8 @@ class Frontier:
     tickets: tuple[TicketRecord, ...]
 
     @classmethod
-    def discover(cls, workspace: Path, spec: Path | None = None) -> Frontier:
-        resolved_spec = _resolve_spec(workspace, spec)
+    def discover(cls, working_directory: Path, spec: Path | None = None) -> Frontier:
+        resolved_spec = _resolve_spec(working_directory, spec)
         execution_map = resolved_spec.parent / ".loopai" / _TRACKER_NAME
         _sync_execution_map(resolved_spec, execution_map)
         return cls.load(resolved_spec, execution_map)
@@ -257,23 +257,29 @@ def _write_execution_map(path: Path, payload: dict[str, object]) -> None:
     temporary.replace(path)
 
 
-def _resolve_spec(workspace: Path, spec: Path | None) -> Path:
+def _resolve_spec(working_directory: Path, spec: Path | None) -> Path:
     if spec is not None:
         candidate = spec.expanduser()
         if not candidate.is_absolute():
-            candidate = workspace / candidate
+            candidate = working_directory / candidate
         candidate = candidate.resolve()
         if not candidate.is_file():
             raise ValueError(f"Spec does not exist: {candidate}")
+        try:
+            candidate.relative_to(working_directory.resolve())
+        except ValueError:
+            raise ValueError(
+                f"Spec must be inside the working directory: {candidate}"
+            ) from None
         return candidate
 
     candidates = sorted(
         path.resolve()
-        for path in workspace.rglob("spec.md")
+        for path in working_directory.rglob("spec.md")
         if not any(part in {".git", ".venv", "node_modules"} for part in path.parts)
     )
     if not candidates:
-        raise ValueError(f"No spec.md found under workspace: {workspace}")
+        raise ValueError(f"No spec.md found under working directory: {working_directory}")
     if len(candidates) > 1:
         choices = "\n".join(f"- {path}" for path in candidates)
         raise ValueError(f"Multiple spec.md files found; select one with --spec:\n{choices}")

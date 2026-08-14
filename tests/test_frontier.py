@@ -12,10 +12,10 @@ from test_orchestrator import create_initiative
 class FrontierTests(unittest.TestCase):
     def test_discovers_ticket_metadata_and_blockers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
 
-            frontier = Frontier.discover(workspace, spec)
+            frontier = Frontier.discover(working_directory, spec)
 
         self.assertEqual([ticket.ticket_id for ticket in frontier.tickets], ["01", "02"])
         self.assertEqual(frontier.tickets[1].blockers, ("01",))
@@ -24,10 +24,10 @@ class FrontierTests(unittest.TestCase):
 
     def test_creates_tracker_without_readme(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
 
-            frontier = Frontier.discover(workspace, spec)
+            frontier = Frontier.discover(working_directory, spec)
             tracker = spec.parent / ".loopai" / "execution.json"
 
             self.assertFalse((spec.parent / "README.md").exists())
@@ -39,28 +39,28 @@ class FrontierTests(unittest.TestCase):
 
     def test_auto_discovers_the_only_spec(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
 
-            frontier = Frontier.discover(workspace)
+            frontier = Frontier.discover(working_directory)
 
         self.assertEqual(frontier.spec, spec.resolve())
 
     def test_rejects_multiple_implicit_specs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            create_initiative(workspace)
-            other = workspace / "other"
+            working_directory = Path(directory)
+            create_initiative(working_directory)
+            other = working_directory / "other"
             other.mkdir()
             (other / "spec.md").write_text("# Other\n", encoding="utf-8")
 
             with self.assertRaisesRegex(ValueError, "Multiple spec.md"):
-                Frontier.discover(workspace)
+                Frontier.discover(working_directory)
 
     def test_rejects_unknown_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            workspace = Path(directory)
-            spec = create_initiative(workspace)
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
             first_ticket = spec.parent / "issues" / "01-first.md"
             first_ticket.write_text(
                 first_ticket.read_text(encoding="utf-8").replace(
@@ -70,7 +70,19 @@ class FrontierTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(ValueError, "unknown blockers: 99"):
-                Frontier.discover(workspace, spec)
+                Frontier.discover(working_directory, spec)
+
+    def test_rejects_spec_outside_the_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            outside = working_directory.parent / "outside-spec.md"
+            outside.write_text("# Outside\n", encoding="utf-8")
+
+            try:
+                with self.assertRaisesRegex(ValueError, "inside the working directory"):
+                    Frontier.discover(working_directory, outside)
+            finally:
+                outside.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
