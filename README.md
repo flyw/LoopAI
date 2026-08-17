@@ -300,16 +300,58 @@ loopai-mcp
 `loopai-mcp` uses stdio and takes its project directory from its process `cwd`. It exposes three
 tools: `loopai_run`, `loopai_status`, and `loopai_stop`.
 
+`loopai_run` waits by default, preserving the synchronous one-ticket call. Pass `wait: false` to
+start one detached Worker and return immediately; there is only one Worker slot per initiative.
+
 ```json
 {
   "spec": "spec.md",
-  "answer": "The external action is complete. Please continue."
+  "answer": "The external action is complete. Please continue.",
+  "wait": true
 }
 ```
 
-Both fields are optional. An omitted `answer` starts or continues a normal turn. An `answer`
-resumes a pending handoff. The result is a compact object containing `status`, `cause`, progress,
-the current ticket, Planner summary, `status_file`, and the next action.
+All fields are optional and `wait` defaults to `true`. An omitted `answer` starts or continues a
+normal turn. An `answer` resumes a pending handoff. The synchronous result is a compact object
+containing `status`, `cause`, progress, the current ticket, Planner summary, `status_file`, and the
+next action.
+
+For background execution, call:
+
+```json
+{
+  "spec": "spec.md",
+  "wait": false
+}
+```
+
+The tool atomically reserves `.loopai/worker.lock`, starts a detached Worker, and returns without
+waiting for Codex:
+
+```json
+{
+  "schema_version": 2,
+  "event": "initiative.accepted",
+  "status": "starting",
+  "worker_pid": 12345,
+  "next_action": "Poll loopai_status for the Worker phase and terminal result."
+}
+```
+
+If another Worker is already starting or running, no second process is created:
+
+```json
+{
+  "event": "initiative.already-running",
+  "status": "running",
+  "worker_pid": 12345,
+  "next_action": "Poll loopai_status for the current Worker phase."
+}
+```
+
+The Worker runs with the configured project as its working directory, uses an independent session,
+and redirects both stdout and stderr to `.loopai/worker.log`. It does not inherit the MCP stdio
+protocol channel or depend on the current tool request.
 
 Use `loopai_status` to inspect the live phase without acquiring the initiative mutation lock:
 
@@ -319,9 +361,10 @@ Use `loopai_status` to inspect the live phase without acquiring the initiative m
 }
 ```
 
-It reports the lifecycle (`running`, `stopping`, `handoff`, `ticket-completed`, `completed`, or
-`interrupted`), phase (`coordinator`, `executor`, `verifier`, or `waiting-input`), current ticket,
-round, last significant event, durable ticket progress, and whether a stop request is pending.
+It reports the lifecycle (`starting`, `running`, `stop_requested`, `handoff`, `stopped`,
+`ticket-completed`, `completed`, `error`, or `interrupted`), phase (`coordinator`, `executor`,
+`verifier`, or `waiting-input`), current ticket, round, last significant event, durable ticket
+progress, `worker_pid`, `heartbeat_at`, and whether a stop request is pending.
 
 If the current work has diverged from the ticket, request a controlled stop:
 
@@ -332,9 +375,11 @@ If the current work has diverged from the ticket, request a controlled stop:
 }
 ```
 
-`loopai_stop` does not kill the MCP or Codex process. It asks the Orchestrator to stop at the next
-safe agent boundary, persist an `operator-stop` handoff, and release the initiative lock. After
-inspecting the handoff, resume with corrected guidance:
+`loopai_stop` does not kill the MCP or Codex process. It writes `.loopai/control.json`; the status
+becomes `stop_requested` while the current Codex call reaches a safe boundary. The Orchestrator
+then persists an `operator-stop` handoff, changes the lifecycle to `stopped`, releases
+`.loopai/worker.lock`, and removes the control request. After inspecting the handoff, resume with
+corrected guidance:
 
 ```json
 {
@@ -345,6 +390,11 @@ inspecting the handoff, resume with corrected guidance:
 
 Do not modify a prompt belonging to an already-running Codex child. Stop first, then provide the
 correction through the resumed handoff.
+
+Resume is state-checked: `answer` is required for `handoff`, `stopped`, and pending user-input
+states; a running initiative returns `initiative.already-running`; a completed initiative returns
+`initiative.already-completed`. A dead Worker PID leaves an interrupted state and its stale lock is
+reclaimed atomically by the next start.
 
 Do not pass a project directory as a tool argument. Configure the MCP server's process working
 directory instead. For example, a Codex TOML configuration can use an absolute executable path:

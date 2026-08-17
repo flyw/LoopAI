@@ -36,14 +36,15 @@ boundary. A tool call cannot select an arbitrary directory.
 The server exposes:
 
 ```text
-loopai_run(spec?: string, answer?: string) -> object
+loopai_run(spec?: string, answer?: string, wait?: boolean) -> object
 loopai_status(spec?: string) -> object
 loopai_stop(spec?: string, reason?: string) -> object
 ```
 
-The tool runs one ticket turn. `answer` is used to resume an existing handoff. A successful
-non-final ticket returns `event: "initiative.ticket-completed"` and asks the host to call
-`loopai_run` again without an answer. The result contains:
+`wait` defaults to `true`, so the tool preserves the synchronous one-ticket behavior. `answer` is
+used to resume an existing handoff. A successful non-final ticket returns
+`event: "initiative.ticket-completed"` and asks the host to call `loopai_run` again without an
+answer. The result contains:
 
 ```json
 {
@@ -81,6 +82,33 @@ action, and call `loopai_run` again with the result in `answer`.
 After receiving `event: "initiative.ticket-completed"`, the host should call `loopai_run` again to
 process the next dependency-ready ticket.
 
+To return immediately while one ticket is executing, pass `wait: false`:
+
+```json
+{
+  "spec": "spec.md",
+  "wait": false
+}
+```
+
+LoopAI atomically reserves `.loopai/worker.lock`, starts one detached Worker, and returns:
+
+```json
+{
+  "schema_version": 2,
+  "event": "initiative.accepted",
+  "status": "starting",
+  "worker_pid": 12345,
+  "next_action": "Poll loopai_status for the Worker phase and terminal result."
+}
+```
+
+There is no job queue or public job id. If a Worker is already starting or running, the second call
+returns `event: "initiative.already-running"` and does not start another process. The Worker uses
+the configured project `cwd`, starts an independent session, redirects stdout and stderr to
+`.loopai/worker.log`, and invokes the core `run_loopai_once()` function directly rather than
+calling an MCP tool.
+
 ## Live status and controlled stop
 
 `loopai_status` is status-oriented and does not acquire the initiative mutation lock. It reads the
@@ -88,22 +116,26 @@ durable tracker plus `.loopai/runtime.json`, so it can report a running invocati
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "event": "initiative.status",
   "status": "running",
   "phase": "verifier",
   "active": true,
+  "worker_pid": 12345,
   "current_ticket_id": "01",
   "round": 2,
   "last_event": "verifier.started",
   "completed": 0,
   "total": 2,
-  "stop_requested": false
+  "stop_requested": false,
+  "heartbeat_at": "2026-08-17T12:00:00+00:00"
 }
 ```
 
 The phase is a safe orchestration checkpoint, not a raw model transcript. It can be
-`coordinator`, `executor`, `verifier`, or `waiting-input`.
+`coordinator`, `executor`, `verifier`, or `waiting-input`. The lifecycle can be `starting`,
+`running`, `stop_requested`, `handoff`, `stopped`, `ticket-completed`, `completed`, `error`, or
+`interrupted`.
 
 When the status indicates that work has diverged, call `loopai_stop`:
 
@@ -115,9 +147,10 @@ When the status indicates that work has diverged, call `loopai_stop`:
 ```
 
 The stop request is written to `.loopai/control.json`. The current agent call is allowed to finish;
-the Orchestrator then creates an `initiative.handoff` with cause `operator-stop`, writes the request
-reason to the durable conversation, and removes the control request. The host can then correct the
-guidance and resume:
+the lifecycle becomes `stop_requested` while it waits for the safe boundary. The Orchestrator then
+creates an `initiative.handoff` with cause `operator-stop`, writes the request reason to the durable
+conversation, changes the lifecycle to `stopped`, releases `.loopai/worker.lock`, and removes the
+control request. The host can then correct the guidance and resume:
 
 ```text
 loopai_run(
@@ -126,8 +159,14 @@ loopai_run(
 )
 ```
 
-This control path deliberately does not kill the MCP server or the Codex child process. A process
-kill remains an emergency recovery action and may leave only partial runtime state.
+This control path deliberately does not kill the MCP server or the Codex child process. If Codex is
+stuck, the Worker remains `stop_requested` until the child returns. A process kill remains an
+emergency recovery action and may leave only partial runtime state.
+
+Resume is state-checked. `answer` is required for `handoff`, `stopped`, and pending user-input
+states. A running initiative returns `initiative.already-running`; a completed initiative returns
+`initiative.already-completed`. If the recorded Worker PID no longer exists, the next start treats
+the Worker lock as stale and reclaims it atomically.
 
 ## Codex configuration
 
@@ -168,7 +207,10 @@ that prints banners or status messages to stdout.
 
 ## Concurrency and safety
 
-- The initiative lock prevents two LoopAI turns from mutating the same initiative simultaneously.
+- `.loopai/worker.lock` is acquired with an atomic create, so two simultaneous `wait: false` calls
+  cannot both start a Worker.
+- Starting/running states reject another start; `handoff`, `stopped`, and pending user-input states
+  require `answer`; `completed` reports completion; `error` can be retried.
 - `loopai_status` is safe to call while a turn is running; `loopai_stop` writes a request for that
   running turn and does not take over its mutation lock.
 - The host should expose the tool with an approval policy appropriate for repository writes.

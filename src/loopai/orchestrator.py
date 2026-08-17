@@ -46,6 +46,8 @@ class InitiativeOrchestrator:
         failure: BaseException | None = None
 
         async def emit(event: StreamEvent) -> None:
+            if self._runtime is not None:
+                self._runtime.update()
             await queue.put(event)
             # Let the stream consumer render queued progress before a worker-side
             # input provider writes its prompt directly to the terminal.
@@ -428,7 +430,7 @@ class InitiativeOrchestrator:
                 question=question,
             )
             runtime.update(
-                lifecycle="handoff",
+                lifecycle="stopped" if cause == "operator-stop" else "handoff",
                 phase="handoff",
                 role=AgentRole.COORDINATOR.value,
                 current_ticket_id=(

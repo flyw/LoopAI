@@ -370,7 +370,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].payload["cause"], "operator-stop")
         self.assertIn("Verifier left the ticket scope", events[-1].payload["summary"])
         self.assertIn("corrected guidance", status)
-        self.assertEqual(runtime["lifecycle"], "handoff")
+        self.assertEqual(runtime["lifecycle"], "stopped")
         self.assertFalse((spec.parent / ".loopai" / "control.json").exists())
 
     async def test_operator_stop_resumes_with_corrected_guidance(self) -> None:
