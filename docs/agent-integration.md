@@ -1,8 +1,8 @@
 # Outer-agent integration
 
 This document defines the machine-facing contract for an agent that launches the `loopai` CLI.
-The CLI is a single-turn worker: it runs until the initiative completes or until the Planner creates
-a handoff for the outer agent.
+The CLI is a single-ticket worker: it runs until one ticket completes, the initiative completes, or
+the Planner creates a handoff for the outer agent.
 
 ## Launch
 
@@ -42,14 +42,14 @@ Read stdout line by line. Each line is a JSON object:
 }
 ```
 
-Treat unknown event kinds as forward-compatible progress events. The terminal event is either
-`initiative.completed` or `initiative.handoff`.
+Treat unknown event kinds as forward-compatible progress events. The terminal event is
+`initiative.ticket-completed`, `initiative.completed`, or `initiative.handoff`.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | All tickets completed and persisted. |
+| `0` | One ticket completed and persisted, or all tickets completed and persisted. |
 | `1` | A safe handoff was persisted. Read the status file and decide the next action. |
 | `2` | LoopAI could not initialize or encountered a runtime/configuration error. |
 
@@ -58,7 +58,8 @@ Exit code `1` is expected control flow. The outer agent should not retry it blin
 ## Handoff loop
 
 1. Launch LoopAI.
-2. If the exit code is `0`, continue the outer workflow.
+2. If the terminal event is `initiative.ticket-completed`, launch LoopAI again without an answer to
+   process the next dependency-ready ticket.
 3. If the exit code is `1`, read `LOOPAI_STATUS.md` and the referenced tracker/ticket files.
 4. Perform the external action or repository repair requested by the Planner.
 5. Launch LoopAI again with the result:
@@ -81,7 +82,9 @@ set -e
 
 case "$status" in
   0)
-    echo "LoopAI completed the initiative"
+    echo "LoopAI completed one ticket (or the initiative)"
+    # With --json, inspect the terminal event. Repeat without --answer when it is
+    # initiative.ticket-completed and more tickets remain.
     ;;
   1)
     echo "LoopAI handed control to the outer agent" >&2

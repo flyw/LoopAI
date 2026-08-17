@@ -16,8 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopai",
         description=(
-            "Complete every ticket in a spec frontier with coordinator, executor, "
-            "and verifier agents from the current working directory."
+            "Complete one ticket per invocation with coordinator, executor, and "
+            "verifier agents from the current working directory."
         ),
     )
     parser.add_argument(
@@ -92,7 +92,11 @@ async def async_main(argv: list[str] | None = None) -> int:
     )
     final_status: str | None = None
     async for event in orchestrator.stream(args.spec):
-        if event.kind in {"initiative.completed", "initiative.handoff"}:
+        if event.kind in {
+            "initiative.completed",
+            "initiative.ticket-completed",
+            "initiative.handoff",
+        }:
             final_status = str(event.payload["status"])
         if args.json:
             print(json.dumps(event.as_dict(), ensure_ascii=False), flush=True)
@@ -103,7 +107,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             "A --answer was supplied without a pending Planner handoff; "
             "start LoopAI from the initiative's current state and inspect LOOPAI_STATUS.md."
         )
-    return 0 if final_status == "completed" else 1
+    return 0 if final_status in {"completed", "ticket-completed"} else 1
 
 
 def config_from_args(args: argparse.Namespace) -> LoopConfig:
@@ -166,6 +170,7 @@ def _print_pretty(event: dict[str, object]) -> None:
     elif kind in {
         "initiative.started",
         "initiative.completed",
+        "initiative.ticket-completed",
         "initiative.handoff",
         "ticket.started",
         "agent.completed",

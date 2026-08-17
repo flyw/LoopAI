@@ -81,6 +81,16 @@ class StatusFile:
                     "```",
                 ]
             )
+        elif status == "ticket-completed":
+            lines.extend(
+                [
+                    "",
+                    "## Result",
+                    "",
+                    "The current ticket completed successfully.",
+                    "Run LoopAI again to process the next dependency-ready ticket.",
+                ]
+            )
         else:
             lines.extend(["", "## Result", "", "The initiative completed successfully."])
 

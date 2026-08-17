@@ -31,6 +31,26 @@ class CliConfigurationTests(unittest.TestCase):
 
 
 class CliRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ticket_completion_is_a_successful_single_turn(self) -> None:
+        class FakeOrchestrator:
+            def __init__(self, config: object, input_provider: object = None) -> None:
+                del config, input_provider
+
+            async def stream(self, spec: Path | None = None) -> AsyncIterator[StreamEvent]:
+                del spec
+                yield StreamEvent(
+                    kind="initiative.ticket-completed",
+                    payload={"status": "ticket-completed"},
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            with patch("loopai.cli.Path.cwd", return_value=working_directory):
+                with patch("loopai.cli.InitiativeOrchestrator", FakeOrchestrator):
+                    status = await async_main([])
+
+        self.assertEqual(status, 0)
+
     async def test_default_cli_never_reads_terminal_input(self) -> None:
         captured: dict[str, object] = {}
 

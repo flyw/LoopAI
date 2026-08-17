@@ -15,14 +15,19 @@ from .prompts import (
     verifier_prompt,
 )
 from .runner import AgentProcessError, CodexRunner
+from .runtime import RuntimeStateStore
 from .status import StatusFile
 
 _DONE = object()
 InputProvider = Callable[[dict[str, Any]], Awaitable[Optional[str]]]
+_OPERATOR_STOP_QUESTION = (
+    "LoopAI was stopped by the Outer Agent. Review the current repository and provide "
+    "corrected guidance before resuming."
+)
 
 
 class InitiativeOrchestrator:
-    """Completes every ticket in a spec's dependency frontier, one at a time."""
+    """Completes at most one ticket per invocation of the orchestration loop."""
 
     def __init__(
         self,
@@ -34,6 +39,7 @@ class InitiativeOrchestrator:
         self.runner = runner or CodexRunner(config)
         self.input_provider = input_provider
         self._conversation: ConversationStore | None = None
+        self._runtime: RuntimeStateStore | None = None
 
     async def stream(self, spec: Path | None = None) -> AsyncIterator[StreamEvent]:
         queue: asyncio.Queue[StreamEvent | object] = asyncio.Queue()
@@ -50,11 +56,21 @@ class InitiativeOrchestrator:
             try:
                 await self._run_initiative(spec, emit)
             except BaseException as error:
+                if self._runtime is not None and not isinstance(
+                    error, asyncio.CancelledError
+                ):
+                    self._runtime.update(
+                        lifecycle="error",
+                        phase="error",
+                        last_event="orchestrator.error",
+                        summary=str(error),
+                    )
                 failure = error
             finally:
                 if self._conversation is not None:
                     self._conversation.close()
                     self._conversation = None
+                self._runtime = None
                 await queue.put(_DONE)
 
         task = asyncio.create_task(work())
@@ -84,6 +100,16 @@ class InitiativeOrchestrator:
         )
         conversation.open()
         self._conversation = conversation
+        runtime = RuntimeStateStore(frontier.spec.parent)
+        runtime.start(
+            spec=str(frontier.spec),
+            execution_map=str(frontier.execution_map),
+            current_ticket_id=None,
+            current_ticket_path=None,
+            completed=len(frontier.completed_ids),
+            total=len(frontier.tickets),
+        )
+        self._runtime = runtime
         status_file = StatusFile(self.config.working_directory)
         coordinator_session = conversation.coordinator_session_id
         coordinator_turn = 0
@@ -150,6 +176,18 @@ class InitiativeOrchestrator:
 
             for _ in range(self.config.max_questions + 1):
                 coordinator_turn += 1
+                runtime.update(
+                    lifecycle="running",
+                    phase="coordinator",
+                    role=AgentRole.COORDINATOR.value,
+                    round=coordinator_turn,
+                    current_ticket_id=(record.ticket_id if record is not None else None),
+                    current_ticket_path=(
+                        str(record.path) if record is not None else None
+                    ),
+                    last_event="coordinator.started",
+                    summary=observation,
+                )
                 try:
                     decision = await self.runner.run(
                         role=AgentRole.COORDINATOR,
@@ -211,6 +249,15 @@ class InitiativeOrchestrator:
                         )
                 coordinator_session = decision.session_id
                 conversation.set_session(coordinator_session)
+                runtime.update(
+                    lifecycle="running",
+                    phase="coordinator",
+                    role=AgentRole.COORDINATOR.value,
+                    round=coordinator_turn,
+                    last_event="agent.completed",
+                    agent_status=decision.status,
+                    summary=decision.summary,
+                )
                 await emit(
                 StreamEvent(
                     kind="agent.completed",
@@ -346,6 +393,13 @@ class InitiativeOrchestrator:
                 },
             )
         )
+        runtime.update(
+            lifecycle="running",
+            phase="selecting-ticket",
+            last_event="initiative.started",
+            completed=len(frontier.completed_ids),
+            total=len(frontier.tickets),
+        )
 
         async def publish_handoff(
             *,
@@ -354,6 +408,7 @@ class InitiativeOrchestrator:
             current_ticket_id: str | None = None,
             waiting_ticket_ids: list[str] | None = None,
             error: str | None = None,
+            question: str | None = None,
         ) -> None:
             current_frontier = Frontier.load(frontier.spec, frontier.execution_map)
             selected_ticket_id = current_ticket_id or conversation.state.get(
@@ -367,7 +422,29 @@ class InitiativeOrchestrator:
                 ),
                 None,
             )
-            pending = conversation.mark_handoff(cause=cause, summary=summary)
+            pending = conversation.mark_handoff(
+                cause=cause,
+                summary=summary,
+                question=question,
+            )
+            runtime.update(
+                lifecycle="handoff",
+                phase="handoff",
+                role=AgentRole.COORDINATOR.value,
+                current_ticket_id=(
+                    selected_ticket.ticket_id if selected_ticket is not None else None
+                ),
+                current_ticket_path=(
+                    str(selected_ticket.path) if selected_ticket is not None else None
+                ),
+                completed=len(current_frontier.completed_ids),
+                total=len(current_frontier.tickets),
+                last_event="initiative.handoff",
+                cause=cause,
+                summary=summary,
+            )
+            if cause == "operator-stop":
+                runtime.clear_stop_request()
             status_file.write(
                 status="handoff",
                 cause=cause,
@@ -411,6 +488,17 @@ class InitiativeOrchestrator:
         async def publish_completed(summary: str) -> None:
             current_frontier = Frontier.load(frontier.spec, frontier.execution_map)
             conversation.mark_completed()
+            runtime.update(
+                lifecycle="completed",
+                phase="completed",
+                role=AgentRole.COORDINATOR.value,
+                current_ticket_id=None,
+                current_ticket_path=None,
+                completed=len(current_frontier.completed_ids),
+                total=len(current_frontier.tickets),
+                last_event="initiative.completed",
+                summary=summary,
+            )
             status_file.write(
                 status="completed",
                 cause=None,
@@ -436,7 +524,61 @@ class InitiativeOrchestrator:
                 )
             )
 
+        async def publish_ticket_completed(
+            ticket: TicketRecord, summary: str
+        ) -> None:
+            current_frontier = Frontier.load(frontier.spec, frontier.execution_map)
+            conversation.mark_ticket_completed(ticket.ticket_id)
+            runtime.update(
+                lifecycle="ticket-completed",
+                phase="ticket-completed",
+                role=AgentRole.COORDINATOR.value,
+                current_ticket_id=ticket.ticket_id,
+                current_ticket_path=str(ticket.path),
+                completed=len(current_frontier.completed_ids),
+                total=len(current_frontier.tickets),
+                last_event="initiative.ticket-completed",
+                summary=summary,
+            )
+            status_file.write(
+                status="ticket-completed",
+                cause="ticket-completed",
+                spec=current_frontier.spec,
+                execution_map=current_frontier.execution_map,
+                completed=len(current_frontier.completed_ids),
+                total=len(current_frontier.tickets),
+                current_ticket_id=ticket.ticket_id,
+                current_ticket_path=ticket.path,
+                summary=summary,
+                pending=None,
+            )
+            await emit(
+                StreamEvent(
+                    kind="initiative.ticket-completed",
+                    ticket=ticket.path,
+                    role=AgentRole.COORDINATOR,
+                    payload={
+                        "status": "ticket-completed",
+                        "cause": "ticket-completed",
+                        "completed": len(current_frontier.completed_ids),
+                        "total": len(current_frontier.tickets),
+                        "current_ticket_id": ticket.ticket_id,
+                        "summary": summary,
+                        "status_file": str(status_file.path),
+                    },
+                )
+            )
+
         while True:
+            stop_request = runtime.stop_request()
+            if stop_request is not None:
+                await publish_handoff(
+                    cause="operator-stop",
+                    summary=_operator_stop_summary(stop_request),
+                    current_ticket_id=conversation.state.get("current_ticket_id"),
+                    question=_OPERATOR_STOP_QUESTION,
+                )
+                return
             frontier = Frontier.load(frontier.spec, frontier.execution_map)
             effective_completed = frontier.completed_ids
             if len(effective_completed) == len(frontier.tickets):
@@ -498,7 +640,9 @@ class InitiativeOrchestrator:
                 )
                 return
 
-            result = await self._run_ticket(frontier, ticket, emit, coordinate, action)
+            result = await self._run_ticket(
+                frontier, ticket, runtime, emit, coordinate, action
+            )
             latest_observation = (
                 f"Ticket {ticket.ticket_id} ended with status {result.status}: {result.summary}"
             )
@@ -507,6 +651,11 @@ class InitiativeOrchestrator:
                     cause=result.status,
                     summary=result.summary,
                     current_ticket_id=ticket.ticket_id,
+                    question=(
+                        _OPERATOR_STOP_QUESTION
+                        if result.status == "operator-stop"
+                        else None
+                    ),
                 )
                 return
             refreshed = Frontier.load(frontier.spec, frontier.execution_map)
@@ -523,11 +672,18 @@ class InitiativeOrchestrator:
                     current_ticket_id=ticket.ticket_id,
                 )
                 return
+            if len(refreshed.completed_ids) < len(refreshed.tickets):
+                await publish_ticket_completed(persisted, result.summary)
+                return
+            # The final ticket may complete the initiative. Preserve the existing
+            # initiative-level completion decision, but never start another ticket
+            # in this invocation.
 
     async def _run_ticket(
         self,
         frontier: Frontier,
         record: TicketRecord,
+        runtime: RuntimeStateStore,
         emit: Callable[[StreamEvent], Awaitable[None]],
         coordinate: Callable[
             [str, TicketRecord | None, str, str | None, str | None],
@@ -548,7 +704,26 @@ class InitiativeOrchestrator:
             )
         )
         for round_number in range(1, self.config.max_rounds + 1):
+            stop_result = await self._stop_result_if_requested(
+                runtime,
+                emit,
+                ticket,
+                round_number,
+                executor_session,
+                verifier_session,
+            )
+            if stop_result is not None:
+                return stop_result
             if not (round_number == 1 and record.status == "ready-for-verification"):
+                runtime.update(
+                    lifecycle="running",
+                    phase="executor",
+                    role=AgentRole.EXECUTOR.value,
+                    round=round_number,
+                    current_ticket_id=record.ticket_id,
+                    current_ticket_path=str(ticket),
+                    last_event="executor.started",
+                )
                 try:
                     executor = await self.runner.run(
                         role=AgentRole.EXECUTOR,
@@ -577,6 +752,15 @@ class InitiativeOrchestrator:
                     )
                 executor_session = executor.session_id
                 _persist_worker_status(frontier, record.ticket_id, executor.status)
+                runtime.update(
+                    lifecycle="running",
+                    phase="executor",
+                    role=AgentRole.EXECUTOR.value,
+                    round=round_number,
+                    last_event="agent.completed",
+                    agent_status=executor.status,
+                    summary=executor.summary,
+                )
                 await emit(
                     StreamEvent(
                         kind="agent.completed",
@@ -587,6 +771,16 @@ class InitiativeOrchestrator:
                     )
                 )
 
+                stop_result = await self._stop_result_if_requested(
+                    runtime,
+                    emit,
+                    ticket,
+                    round_number,
+                    executor_session,
+                    verifier_session,
+                )
+                if stop_result is not None:
+                    return stop_result
                 if executor.status == "incomplete":
                     previous_feedback = executor.summary
                     next_action, decision_reason, decision_feedback = await coordinate(
@@ -653,6 +847,25 @@ class InitiativeOrchestrator:
                     next_action, decision_reason,
                 )
 
+            stop_result = await self._stop_result_if_requested(
+                runtime,
+                emit,
+                ticket,
+                round_number,
+                executor_session,
+                verifier_session,
+            )
+            if stop_result is not None:
+                return stop_result
+            runtime.update(
+                lifecycle="running",
+                phase="verifier",
+                role=AgentRole.VERIFIER.value,
+                round=round_number,
+                current_ticket_id=record.ticket_id,
+                current_ticket_path=str(ticket),
+                last_event="verifier.started",
+            )
             try:
                 verifier = await self.runner.run(
                     role=AgentRole.VERIFIER,
@@ -681,6 +894,15 @@ class InitiativeOrchestrator:
                 )
             verifier_session = verifier.session_id
             _persist_worker_status(frontier, record.ticket_id, verifier.status)
+            runtime.update(
+                lifecycle="running",
+                phase="verifier",
+                role=AgentRole.VERIFIER.value,
+                round=round_number,
+                last_event="agent.completed",
+                agent_status=verifier.status,
+                summary=verifier.summary,
+            )
             await emit(
                 StreamEvent(
                     kind="agent.completed",
@@ -691,6 +913,16 @@ class InitiativeOrchestrator:
                 )
             )
 
+            stop_result = await self._stop_result_if_requested(
+                runtime,
+                emit,
+                ticket,
+                round_number,
+                executor_session,
+                verifier_session,
+            )
+            if stop_result is not None:
+                return stop_result
             if verifier.status != "incomplete":
                 if verifier.status != "completed":
                     recommendation = (
@@ -748,6 +980,28 @@ class InitiativeOrchestrator:
         await self._finish(emit, result)
         return result
 
+    async def _stop_result_if_requested(
+        self,
+        runtime: RuntimeStateStore,
+        emit: Callable[[StreamEvent], Awaitable[None]],
+        ticket: Path,
+        round_number: int,
+        executor_session: str | None,
+        verifier_session: str | None,
+    ) -> TicketResult | None:
+        request = runtime.stop_request()
+        if request is None:
+            return None
+        return await self._decision_stop(
+            emit,
+            ticket,
+            round_number,
+            executor_session,
+            verifier_session,
+            "operator-stop",
+            _operator_stop_summary(request),
+        )
+
     @classmethod
     async def _decision_stop(
         cls,
@@ -780,6 +1034,14 @@ class InitiativeOrchestrator:
             **request,
             "warning": "Do not enter passwords, API keys, or other secrets.",
         }
+        if self._runtime is not None:
+            self._runtime.update(
+                lifecycle="running",
+                phase="waiting-input",
+                role=AgentRole.COORDINATOR.value,
+                last_event="user.input.required",
+                summary=str(request.get("question") or "Waiting for Outer Agent input."),
+            )
         await emit(
             StreamEvent(
                 kind="user.input.required",
@@ -798,6 +1060,8 @@ class InitiativeOrchestrator:
             return "awaiting-user-verification"
         if action == "awaiting-user-input":
             return "awaiting-user-input"
+        if action == "operator-stop":
+            return "operator-stop"
         return "blocked"
 
     @staticmethod
@@ -839,3 +1103,10 @@ def _fallback_question(reason: str, feedback: object) -> str:
     guidance = feedback.strip() if isinstance(feedback, str) and feedback.strip() else None
     details = f"{reason}\n\nRequested guidance:\n{guidance}" if guidance else reason
     return f"{details}\n\nHow should LoopAI proceed?"
+
+
+def _operator_stop_summary(request: dict[str, Any]) -> str:
+    reason = request.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        return f"Controlled stop requested by the Outer Agent: {reason.strip()}"
+    return "Controlled stop requested by the Outer Agent."

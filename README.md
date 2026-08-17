@@ -2,9 +2,10 @@
 
 LoopAI is a spec-first, resumable orchestration loop for coding agents.
 
-It coordinates a Planner, an Executor, and an independent Verifier to implement tickets in
-dependency order. When progress is blocked, LoopAI writes a durable handoff summary and returns
-control to the outer agent instead of waiting for terminal input.
+It coordinates a Planner, an Executor, and an independent Verifier to implement one ticket at a
+time in dependency order. After a ticket completes, the turn ends so the next invocation can start
+the next dependency-ready ticket. When progress is blocked, LoopAI writes a durable handoff summary
+and returns control to the outer agent instead of waiting for terminal input.
 
 > LoopAI is currently alpha software. It runs local Codex CLI sessions and can modify the project
 > directory. Review the [security model](#security-model) before using it on an untrusted project.
@@ -15,6 +16,7 @@ control to the outer agent instead of waiting for terminal input.
 - Builds and validates the ticket dependency frontier.
 - Runs one Planner session for orchestration.
 - Runs a dedicated Executor and an independent Verifier for each ticket.
+- Stops after one ticket completes or requires a handoff; repeated invocations advance the frontier.
 - Persists tracker state and agent sessions under the initiative's `.loopai/` directory.
 - Resumes completed and verification-ready work after a process restart.
 - Emits JSONL events for scripts, CI jobs, and outer agents.
@@ -173,6 +175,8 @@ initiative/.loopai/
 ├── conversation.json
 ├── sessions.json
 ├── execution.json
+├── runtime.json
+├── control.json           # transient stop request, when present
 └── active.lock
 ```
 
@@ -198,6 +202,7 @@ Every stdout line is a JSON object with `schema_version: 1`, `kind`, `ticket`, `
 - `ticket.completed`
 - `user.input.required` — a machine-readable request immediately followed by handoff when no answer
   provider is available
+- `initiative.ticket-completed` — one ticket completed; invoke LoopAI again for the next ticket
 - `initiative.completed`
 - `initiative.handoff`
 
@@ -205,7 +210,7 @@ The terminal event is the outer agent's control signal:
 
 | Exit code | Meaning | Outer-agent action |
 | --- | --- | --- |
-| `0` | The entire initiative completed | Continue with the next workflow step |
+| `0` | One ticket completed, or the entire initiative completed | Invoke again for the next ticket, unless the initiative is complete |
 | `1` | LoopAI handed control back safely | Read `LOOPAI_STATUS.md`, act, then resume |
 | `2` | Configuration, initialization, or runtime error | Report or repair the error |
 
@@ -292,8 +297,8 @@ pip install "loopai-agent-loop[mcp]"
 loopai-mcp
 ```
 
-`loopai-mcp` uses stdio and takes its project directory from its process `cwd`. It exposes one
-tool, `loopai_run`:
+`loopai-mcp` uses stdio and takes its project directory from its process `cwd`. It exposes three
+tools: `loopai_run`, `loopai_status`, and `loopai_stop`.
 
 ```json
 {
@@ -305,6 +310,41 @@ tool, `loopai_run`:
 Both fields are optional. An omitted `answer` starts or continues a normal turn. An `answer`
 resumes a pending handoff. The result is a compact object containing `status`, `cause`, progress,
 the current ticket, Planner summary, `status_file`, and the next action.
+
+Use `loopai_status` to inspect the live phase without acquiring the initiative mutation lock:
+
+```json
+{
+  "spec": "spec.md"
+}
+```
+
+It reports the lifecycle (`running`, `stopping`, `handoff`, `ticket-completed`, `completed`, or
+`interrupted`), phase (`coordinator`, `executor`, `verifier`, or `waiting-input`), current ticket,
+round, last significant event, durable ticket progress, and whether a stop request is pending.
+
+If the current work has diverged from the ticket, request a controlled stop:
+
+```json
+{
+  "spec": "spec.md",
+  "reason": "The verifier is checking files outside the ticket scope."
+}
+```
+
+`loopai_stop` does not kill the MCP or Codex process. It asks the Orchestrator to stop at the next
+safe agent boundary, persist an `operator-stop` handoff, and release the initiative lock. After
+inspecting the handoff, resume with corrected guidance:
+
+```json
+{
+  "spec": "spec.md",
+  "answer": "Re-read the ticket scope, discard the unrelated change, and resume verification."
+}
+```
+
+Do not modify a prompt belonging to an already-running Codex child. Stop first, then provide the
+correction through the resumed handoff.
 
 Do not pass a project directory as a tool argument. Configure the MCP server's process working
 directory instead. For example, a Codex TOML configuration can use an absolute executable path:

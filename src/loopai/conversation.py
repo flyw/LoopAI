@@ -121,6 +121,14 @@ class ConversationStore:
         self.state["status"] = "completed"
         self._save_state()
 
+    def mark_ticket_completed(self, ticket_id: str) -> None:
+        """Persist a clean turn boundary after one ticket completes."""
+
+        self.state["current_ticket_id"] = ticket_id
+        self.state["pending"] = None
+        self.state["status"] = "ticket-completed"
+        self._save_state()
+
     def record_answer(self, answer: str) -> dict[str, Any]:
         pending = self.pending
         if pending is None:

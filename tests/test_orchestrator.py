@@ -9,6 +9,7 @@ from pathlib import Path
 from loopai.models import AgentResult, AgentRole, LoopConfig, StreamEvent
 from loopai.orchestrator import InitiativeOrchestrator
 from loopai.runner import AgentProcessError
+from loopai.runtime import RuntimeStateStore
 
 
 class FakeRunner:
@@ -123,6 +124,35 @@ class FailingExecutorRunner(FakeRunner):
         )
 
 
+class StopAfterExecutorRunner(FakeRunner):
+    def __init__(self, initiative: Path, results: list[AgentResult]) -> None:
+        super().__init__(results)
+        self.initiative = initiative
+
+    async def run(
+        self,
+        *,
+        role: AgentRole,
+        ticket: Path,
+        round_number: int,
+        prompt: str,
+        session_id: str | None,
+        emit: Callable[[StreamEvent], Awaitable[None]],
+    ) -> AgentResult:
+        if role is AgentRole.EXECUTOR:
+            RuntimeStateStore(self.initiative).request_stop(
+                "Verifier left the ticket scope."
+            )
+        return await super().run(
+            role=role,
+            ticket=ticket,
+            round_number=round_number,
+            prompt=prompt,
+            session_id=session_id,
+            emit=emit,
+        )
+
+
 def result(role: AgentRole, status: str, summary: str, session: str) -> AgentResult:
     return AgentResult(
         role=role,
@@ -164,7 +194,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         orchestrator = InitiativeOrchestrator(config, runner=runner)  # type: ignore[arg-type]
         return [event async for event in orchestrator.stream(spec)]
 
-    async def test_discovers_spec_and_completes_all_tickets_in_dependency_order(self) -> None:
+    async def test_completes_one_ticket_per_invocation_and_resumes_next_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             working_directory = Path(directory)
             create_initiative(working_directory)
@@ -177,8 +207,12 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
                 ]
             )
 
-            events = await self.collect(working_directory, runner)
-            status = (working_directory / "LOOPAI_STATUS.md").read_text(
+            first_events = await self.collect(working_directory, runner)
+            first_status = (working_directory / "LOOPAI_STATUS.md").read_text(
+                encoding="utf-8"
+            )
+            second_events = await self.collect(working_directory, runner)
+            second_status = (working_directory / "LOOPAI_STATUS.md").read_text(
                 encoding="utf-8"
             )
 
@@ -188,12 +222,18 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             if call["role"] is AgentRole.EXECUTOR
         ]
         self.assertEqual(executor_tickets, ["01-first.md", "02-second.md"])
-        self.assertEqual(events[0].kind, "initiative.started")
-        self.assertEqual(events[-1].kind, "initiative.completed")
-        self.assertEqual(events[-1].payload["status"], "completed")
-        self.assertEqual(events[-1].payload["total"], 2)
-        self.assertIn("Status: `completed`", status)
-        self.assertIn("The initiative completed successfully.", status)
+        self.assertEqual(first_events[0].kind, "initiative.started")
+        self.assertEqual(first_events[-1].kind, "initiative.ticket-completed")
+        self.assertEqual(first_events[-1].payload["status"], "ticket-completed")
+        self.assertEqual(first_events[-1].payload["current_ticket_id"], "01")
+        self.assertEqual(first_events[-1].payload["completed"], 1)
+        self.assertIn("Status: `ticket-completed`", first_status)
+        self.assertIn("Run LoopAI again", first_status)
+        self.assertEqual(second_events[-1].kind, "initiative.completed")
+        self.assertEqual(second_events[-1].payload["status"], "completed")
+        self.assertEqual(second_events[-1].payload["total"], 2)
+        self.assertIn("Status: `completed`", second_status)
+        self.assertIn("The initiative completed successfully.", second_status)
 
     async def test_skips_completed_ticket_and_starts_new_frontier(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -231,9 +271,10 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             call for call in runner.calls if call["role"] is not AgentRole.COORDINATOR
         ]
         self.assertEqual(worker_calls[0]["role"], AgentRole.VERIFIER)
-        self.assertEqual(worker_calls[1]["role"], AgentRole.EXECUTOR)
-        self.assertEqual(events[-1].payload["current_ticket_id"], "02")
-        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(len(worker_calls), 1)
+        self.assertEqual(events[-1].kind, "initiative.ticket-completed")
+        self.assertEqual(events[-1].payload["current_ticket_id"], "01")
+        self.assertEqual(events[-1].payload["status"], "ticket-completed")
 
     async def test_failed_verification_reacts_with_feedback_and_reuses_two_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -256,6 +297,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executor_calls[1]["session_id"], "exec-1")
         self.assertEqual(verifier_calls[1]["session_id"], "verify-1")
         self.assertIn("missing test", str(executor_calls[1]["prompt"]))
+        self.assertEqual({Path(call["ticket"]).name for call in executor_calls}, {"01-first.md"})
 
     async def test_incomplete_executor_retries_same_session_before_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -286,8 +328,9 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(worker_calls[1]["session_id"], "exec-1")
         self.assertIn("ruff not run", str(worker_calls[1]["prompt"]))
-        self.assertEqual(events[-1].payload["current_ticket_id"], "02")
-        self.assertEqual(events[-1].payload["status"], "handoff")
+        self.assertEqual(events[-1].kind, "initiative.ticket-completed")
+        self.assertEqual(events[-1].payload["current_ticket_id"], "01")
+        self.assertEqual(events[-1].payload["status"], "ticket-completed")
 
     async def test_ticket_failure_stops_before_downstream_ticket(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -305,6 +348,59 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1].payload["status"], "handoff")
         self.assertEqual(events[-1].payload["cause"], "blocked")
         self.assertEqual(events[-1].payload["current_ticket_id"], "01")
+
+    async def test_operator_stop_persists_correctable_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
+            runner = StopAfterExecutorRunner(
+                spec.parent,
+                [result(AgentRole.EXECUTOR, "ready-for-verification", "patch", "exec-1")],
+            )
+
+            events = await self.collect(working_directory, runner, spec)
+            status = (working_directory / "LOOPAI_STATUS.md").read_text(
+                encoding="utf-8"
+            )
+            runtime = json.loads(
+                (spec.parent / ".loopai" / "runtime.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(events[-1].kind, "initiative.handoff")
+        self.assertEqual(events[-1].payload["cause"], "operator-stop")
+        self.assertIn("Verifier left the ticket scope", events[-1].payload["summary"])
+        self.assertIn("corrected guidance", status)
+        self.assertEqual(runtime["lifecycle"], "handoff")
+        self.assertFalse((spec.parent / ".loopai" / "control.json").exists())
+
+    async def test_operator_stop_resumes_with_corrected_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            working_directory = Path(directory)
+            spec = create_initiative(working_directory)
+            first_runner = StopAfterExecutorRunner(
+                spec.parent,
+                [result(AgentRole.EXECUTOR, "ready-for-verification", "patch", "exec-1")],
+            )
+            await self.collect(working_directory, first_runner, spec)
+
+            async def provide_input(request: dict[str, object]) -> str | None:
+                del request
+                return "Re-read the ticket scope and resume verification."
+
+            second_runner = FakeRunner(
+                [result(AgentRole.VERIFIER, "completed", "verified", "verify-1")]
+            )
+            orchestrator = InitiativeOrchestrator(
+                LoopConfig(working_directory=working_directory),
+                runner=second_runner,  # type: ignore[arg-type]
+                input_provider=provide_input,
+            )
+            events = [event async for event in orchestrator.stream(spec)]
+
+        coordinator_calls = calls_for(second_runner, AgentRole.COORDINATOR)
+        self.assertIn("Re-read the ticket scope", str(coordinator_calls[0]["prompt"]))
+        self.assertEqual(len(calls_for(second_runner, AgentRole.EXECUTOR)), 0)
+        self.assertEqual(events[-1].kind, "initiative.ticket-completed")
 
     async def test_agent_process_error_is_summarized_and_handed_off(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -380,7 +476,7 @@ class InitiativeOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             await self.collect(working_directory, runner)
 
         coordinator_calls = calls_for(runner, AgentRole.COORDINATOR)
-        self.assertGreaterEqual(len(coordinator_calls), 3)
+        self.assertEqual(len(coordinator_calls), 2)
         self.assertIsNone(coordinator_calls[0]["session_id"])
         self.assertTrue(
             all(call["session_id"] == "coord-1" for call in coordinator_calls[1:])
